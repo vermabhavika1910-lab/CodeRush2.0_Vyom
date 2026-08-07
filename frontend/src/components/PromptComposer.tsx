@@ -9,7 +9,11 @@ interface Attachment {
   size: string;
 }
 
-export function PromptComposer() {
+interface PromptComposerProps {
+  onSubmitPrompt?: (prompt: string) => void;
+}
+
+export function PromptComposer({ onSubmitPrompt }: PromptComposerProps) {
   const [value, setValue] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [focused, setFocused] = useState(false);
@@ -30,6 +34,9 @@ export function PromptComposer() {
   const send = () => {
     if (!value.trim() && attachments.length === 0) return;
     push({ title: 'Task dispatched', message: 'Maestro is orchestrating your agents…', variant: 'info' });
+    if (onSubmitPrompt) {
+      onSubmitPrompt(value);
+    }
     setValue('');
     setAttachments([]);
   };

@@ -12,7 +12,7 @@ export function useResizable(initial: number, min: number, max: number, axis: 'x
         if (!startRef.current) return;
         const current = axis === 'x' ? ev.clientX : ev.clientY;
         const delta = current - startRef.current.pos;
-        const next = Math.max(min, Math.min(max, startRef.current.size + delta));
+        const next = Math.max(min, Math.min(max, startRef.current.size + (axis === 'y' ? -delta : delta)));
         setSize(next);
       };
       const up = () => {

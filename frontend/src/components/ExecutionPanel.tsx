@@ -12,23 +12,37 @@ import {
   ShieldCheck,
   Check,
   X,
+  FileText,
 } from 'lucide-react';
 import { VERIFICATION, type AgentStatus } from '@/data/mock';
 import { useToast } from '@/components/Toast';
 import { api } from '@/services/api';
+import { useTheme } from '@/theme/ThemeProvider';
 
 interface ExecutionPanelProps {
   collapsed: boolean;
   onToggle: () => void;
   height?: number;
   activeRunId?: string | null;
+  simulatedSteps?: any[];
+  simulatedArtifacts?: any[];
 }
 
-export function ExecutionPanel({ collapsed, onToggle, height, activeRunId }: ExecutionPanelProps) {
+export function ExecutionPanel({ collapsed, onToggle, height, activeRunId, simulatedSteps, simulatedArtifacts }: ExecutionPanelProps) {
   const { push } = useToast();
   const [steps, setSteps] = useState<any[]>([]);
+  const [artifacts, setArtifacts] = useState<any[]>([]);
 
   useEffect(() => {
+    if (simulatedSteps) {
+      setSteps(simulatedSteps);
+      if (simulatedArtifacts) {
+        setArtifacts(simulatedArtifacts);
+      } else {
+        setArtifacts([]);
+      }
+      return;
+    }
     if (!activeRunId) return;
     const interval = setInterval(() => {
       api.getRun(activeRunId).then((data) => {
@@ -52,18 +66,24 @@ export function ExecutionPanel({ collapsed, onToggle, height, activeRunId }: Exe
           }
           if (e.type === 'start') {
             nodeMap[e.node_id].status = 'running';
-          } else if (e.type === 'end') {
+          } else if (e.type === 'end' || e.type === 'success' || e.type === 'approval') {
             nodeMap[e.node_id].status = 'success';
-            nodeMap[e.node_id].cost = e.data?.cost || 0;
-            nodeMap[e.node_id].latency = e.data?.latency_ms || 0;
-            nodeMap[e.node_id].tokens = e.data?.tokens || 0;
+            nodeMap[e.node_id].cost = e.cost !== undefined ? e.cost : (e.data?.cost || 0);
+            nodeMap[e.node_id].latency = e.latency_ms !== undefined ? e.latency_ms : (e.data?.latency_ms || 0);
+            nodeMap[e.node_id].tokens = e.tokens !== undefined ? e.tokens : (e.data?.tokens || 0);
+          } else if (e.type === 'fail' || e.type === 'failure' || e.type === 'blocked') {
+            nodeMap[e.node_id].status = 'failure';
+          } else if (e.type === 'retry') {
+            nodeMap[e.node_id].status = 'retry';
+            nodeMap[e.node_id].retries = (nodeMap[e.node_id].retries || 0) + 1;
           }
         });
         setSteps(newSteps);
+        setArtifacts(data.artifacts || []);
       }).catch(console.error);
     }, 1000);
     return () => clearInterval(interval);
-  }, [activeRunId]);
+  }, [activeRunId, simulatedSteps, simulatedArtifacts]);
 
   const retry = (nodeId: string) => {
     setSteps((s) => s.map((st) => (st.nodeId === nodeId ? { ...st, status: 'running' as AgentStatus } : st)));
@@ -74,9 +94,15 @@ export function ExecutionPanel({ collapsed, onToggle, height, activeRunId }: Exe
     }, 1600);
   };
 
+  const { theme } = useTheme();
+  const videoSrc = theme === 'dark' ? '/dark_mode_m.mp4' : '/light_mode_m.mp4';
+  const hasFailure = steps.some(s => s.status === 'failure');
+  const allCompleted = steps.length > 0 && steps.every(s => s.status === 'success');
+  const isExecuting = steps.length > 0 && !hasFailure && !allCompleted;
+
   return (
     <div
-      className="shrink-0 border-t overflow-hidden"
+      className="shrink-0 border-t overflow-hidden relative"
       style={{ background: 'var(--bg-elev)', borderColor: 'var(--border)', height: collapsed ? 'auto' : height }}
     >
       <button
@@ -95,7 +121,17 @@ export function ExecutionPanel({ collapsed, onToggle, height, activeRunId }: Exe
       </button>
 
       {!collapsed && (
-        <div className="grid grid-cols-1 gap-3 px-4 pb-4 overflow-y-auto" style={{ maxHeight: height ? height - 50 : undefined, gridTemplateColumns: 'minmax(0, 1.6fr) minmax(0, 1fr)' }}>
+        <div className="relative" style={{ height: height ? height - 42 : undefined }}>
+          {/* Main Grid View */}
+          <div 
+            className="grid grid-cols-1 gap-3 px-4 pb-4 h-full overflow-y-auto" 
+            style={{ 
+              gridTemplateColumns: 'minmax(0, 1.6fr) minmax(0, 1fr)',
+              filter: isExecuting ? 'blur(8px)' : 'none',
+              pointerEvents: isExecuting ? 'none' : 'auto',
+              transition: 'filter 0.4s ease'
+            }}
+          >
           {/* Steps */}
           <div className="flex flex-col gap-2">
             {steps.map((s) => (
@@ -161,6 +197,69 @@ export function ExecutionPanel({ collapsed, onToggle, height, activeRunId }: Exe
               </div>
             </div>
           </div>
+
+          {/* Artifacts Preview Card */}
+          {artifacts.length > 0 && (
+            <div className="col-span-1 md:col-span-2 rounded-xl border p-4 mt-3" style={{ borderColor: 'var(--border)', background: 'var(--bg-card)' }}>
+              <div className="flex items-center gap-2 border-b pb-2.5 mb-3.5" style={{ borderColor: 'var(--border-soft)' }}>
+                <FileText size={18} style={{ color: 'var(--brand)' }} />
+                <span className="text-[14px] font-semibold uppercase tracking-wider" style={{ color: 'var(--body-muted)' }}>
+                  Generated Artifacts & Output Results
+                </span>
+              </div>
+              <div className="flex flex-col gap-4">
+                {artifacts.map((art) => (
+                  <div key={art.id} className="rounded-lg p-3.5" style={{ background: 'var(--bg-sunken)' }}>
+                    <div className="text-[12px] font-mono font-bold mb-2 flex items-center justify-between" style={{ color: 'var(--body-muted)' }}>
+                      <span>Node: {art.node_id}</span>
+                      <span className="opacity-60">{art.schema_ref}</span>
+                    </div>
+                    {art.payload_json?.draft ? (
+                      <pre className="text-[13px] font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto" style={{ color: 'var(--body)' }}>
+                        {art.payload_json.draft}
+                      </pre>
+                    ) : art.payload_json?.findings ? (
+                      <ul className="list-disc pl-5 text-[13px] flex flex-col gap-1.5" style={{ color: 'var(--body)' }}>
+                        {art.payload_json.findings.map((f: string, i: number) => (
+                          <li key={i}>{f}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <pre className="text-[13px] font-mono whitespace-pre-wrap" style={{ color: 'var(--body)' }}>
+                        {JSON.stringify(art.payload_json, null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          </div>
+
+          {/* Centered Thinking Overlay */}
+          {isExecuting && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/10 backdrop-blur-[1px]">
+              <div className="flex flex-col items-center gap-3 p-6 rounded-2xl border shadow-lg maestro-fade-in" style={{ background: 'var(--bg-card)', borderColor: 'var(--border)' }}>
+                <video
+                  src={videoSrc}
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                  className="h-20 w-20 rounded-xl object-cover"
+                  style={{ border: '2.5px solid var(--brand)' }}
+                />
+                <div className="flex items-center gap-1.5 mt-2">
+                  <span className="h-2 w-2 rounded-full bg-[var(--brand)] animate-bounce [animation-delay:-0.3s]" />
+                  <span className="h-2 w-2 rounded-full bg-[var(--brand)] animate-bounce [animation-delay:-0.15s]" />
+                  <span className="h-2 w-2 rounded-full bg-[var(--brand)] animate-bounce" />
+                  <span className="text-[13px] font-semibold uppercase tracking-wider ml-1" style={{ color: 'var(--body-muted)' }}>
+                    Orchestrator Thinking...
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -172,8 +271,22 @@ function statusColor(s: AgentStatus) {
 }
 
 function StatusIcon({ status }: { status: AgentStatus }) {
+  const { theme } = useTheme();
+  const videoSrc = theme === 'dark' ? '/dark_mode_m.mp4' : '/light_mode_m.mp4';
   const color = statusColor(status);
-  if (status === 'running') return <Loader2 size={18} className="maestro-spin" style={{ color }} />;
+  if (status === 'running') {
+    return (
+      <video
+        src={videoSrc}
+        autoPlay
+        loop
+        muted
+        playsInline
+        className="h-[24px] w-[24px] rounded-full object-cover shrink-0"
+        style={{ border: '1.5px solid var(--brand)' }}
+      />
+    );
+  }
   if (status === 'success') return <CheckCircle2 size={18} style={{ color }} />;
   if (status === 'failure') return <XCircle size={18} style={{ color }} />;
   if (status === 'retry') return <RotateCw size={18} style={{ color }} />;

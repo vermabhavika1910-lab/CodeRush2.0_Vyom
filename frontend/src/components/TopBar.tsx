@@ -2,6 +2,7 @@ import { Sun, Moon, Save, GitPullRequest, Play, ChevronDown, Check, Menu } from 
 import { useState, useRef, useEffect } from 'react';
 import { useTheme } from '@/theme/ThemeProvider';
 import { useToast } from '@/components/Toast';
+import { MaestroLogo } from './MaestroLogo';
 
 interface TopBarProps {
   workflowName: string;
@@ -58,17 +59,7 @@ export function TopBar({ workflowName, version, onRun, onToggleWorkflow, workflo
 
       {/* Brand */}
       <div className="flex items-center gap-2.5">
-        <div
-          className="flex h-9 w-9 items-center justify-center rounded-lg"
-          style={{ background: 'var(--accent-soft)', border: '1px solid var(--border)' }}
-        >
-          <span style={{ color: 'var(--brand)' }} className="font-[var(--font-brand)] text-xl font-bold leading-none">
-            M
-          </span>
-        </div>
-        <span className="font-[var(--font-brand)] text-xl font-semibold tracking-wide" style={{ color: 'var(--brand)' }}>
-          Maestro
-        </span>
+        <MaestroLogo height={36} className="text-[var(--brand)]" />
       </div>
 
       <div className="mx-1 h-6 w-px hidden sm:block" style={{ background: 'var(--border-soft)' }} />

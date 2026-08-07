@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { WORKFLOW_NODES, WORKFLOW_EDGES, AGENTS, type WorkflowNode, type AgentStatus } from '@/data/mock';
 import { useToast } from '@/components/Toast';
+import { useTheme } from '@/theme/ThemeProvider';
 
 const ICONS: Record<string, LucideIcon> = {
   Search,
@@ -36,12 +37,14 @@ interface WorkflowBuilderProps {
   onClose: () => void;
   libraryWidth?: number;
   onLibraryResize?: (e: React.PointerEvent) => void;
+  nodeStates?: Record<string, string>;
 }
 
-export function WorkflowBuilder({ selectedNodeId, onSelectNode, onClose, libraryWidth = 240, onLibraryResize }: WorkflowBuilderProps) {
+export function WorkflowBuilder({ selectedNodeId, onSelectNode, onClose, libraryWidth = 240, onLibraryResize, nodeStates }: WorkflowBuilderProps) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [autoFit, setAutoFit] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const { push } = useToast();
@@ -114,8 +117,21 @@ export function WorkflowBuilder({ selectedNodeId, onSelectNode, onClose, library
     });
   }, [selectedNodeId]);
 
+  const fullscreenStyles: React.CSSProperties = isFullscreen ? {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    width: '100vw',
+    height: '100vh',
+    zIndex: 9999,
+    backgroundColor: '#070b13',
+  } : {};
+
   return (
-    <div className="flex h-full min-w-0 flex-1">
+    <div 
+      className="flex h-full min-w-0 flex-1"
+      style={{ ...fullscreenStyles }}
+    >
       {/* Agent Library */}
       <aside
         className="hidden shrink-0 flex-col border-r sm:flex"
@@ -189,7 +205,18 @@ export function WorkflowBuilder({ selectedNodeId, onSelectNode, onClose, library
           <button onClick={() => { setAutoFit(false); setZoom((z) => Math.min(2.5, z + 0.1)); }} className="rounded-md border p-1.5 transition-colors hover:bg-[var(--bg-sunken)]" style={{ borderColor: 'var(--border-soft)', color: 'var(--body-muted)' }}>
             <ZoomIn size={16} />
           </button>
-          <button onClick={() => setAutoFit(true)} className="rounded-md border p-1.5 transition-colors hover:bg-[var(--bg-sunken)]" style={{ borderColor: autoFit ? 'var(--accent-strong)' : 'var(--border-soft)', color: autoFit ? 'var(--brand)' : 'var(--body-muted)' }} title="Fit to canvas">
+          <button 
+            onClick={() => {
+              setIsFullscreen(!isFullscreen);
+              setAutoFit(true);
+            }} 
+            className="rounded-md border p-1.5 transition-colors hover:bg-[var(--bg-sunken)]" 
+            style={{ 
+              borderColor: isFullscreen ? 'var(--brand)' : 'var(--border-soft)', 
+              color: isFullscreen ? 'var(--brand)' : 'var(--body-muted)' 
+            }} 
+            title={isFullscreen ? "Exit Fullscreen" : "Maximize Graph"}
+          >
             <Maximize size={16} />
           </button>
           <button onClick={onClose} className="rounded-md border p-1.5 transition-colors hover:bg-[var(--bg-sunken)]" style={{ borderColor: 'var(--border-soft)', color: 'var(--body-muted)' }}>
@@ -235,6 +262,7 @@ export function WorkflowBuilder({ selectedNodeId, onSelectNode, onClose, library
                 node={n}
                 selected={n.id === selectedNodeId}
                 onSelect={() => onSelectNode(n.id)}
+                activeStatus={nodeStates?.[n.id]}
               />
             ))}
           </div>
@@ -244,12 +272,14 @@ export function WorkflowBuilder({ selectedNodeId, onSelectNode, onClose, library
   );
 }
 
-function NodeCard({ node, selected, onSelect }: { node: WorkflowNode; selected: boolean; onSelect: () => void }) {
+function NodeCard({ node, selected, onSelect, activeStatus }: { node: WorkflowNode; selected: boolean; onSelect: () => void; activeStatus?: string }) {
+  const { theme } = useTheme();
+  const videoSrc = theme === 'dark' ? '/dark_mode_m.mp4' : '/light_mode_m.mp4';
   const agent = node.agentId ? AGENTS.find((a) => a.id === node.agentId) : undefined;
   const Icon = node.type === 'start' ? Play : node.type === 'join' ? GitMerge : node.type === 'report' ? FileText : ICONS[agent?.icon || ''] || Circle;
 
-  const statusColor = (s?: AgentStatus) =>
-    s === 'success' ? 'var(--success)' : s === 'running' ? 'var(--brand)' : s === 'failure' ? 'var(--error)' : s === 'retry' ? 'var(--warning)' : s === 'waiting' ? 'var(--body-muted)' : 'var(--accent)';
+  const statusColor = (s?: string) =>
+    s === 'success' ? 'var(--success)' : s === 'running' ? 'var(--brand)' : s === 'failure' ? 'var(--error)' : s === 'retry' ? 'var(--warning)' : s === 'waiting' || s === 'pending' ? 'var(--body-muted)' : 'var(--accent)';
 
   return (
     <div
@@ -269,14 +299,26 @@ function NodeCard({ node, selected, onSelect }: { node: WorkflowNode; selected: 
     >
       <div className="flex h-full flex-col p-4">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-md" style={{ background: 'var(--accent-soft)' }}>
-            <Icon size={18} style={{ color: 'var(--brand)' }} />
-          </div>
+          {activeStatus === 'running' ? (
+            <video
+              src={videoSrc}
+              autoPlay
+              loop
+              muted
+              playsInline
+              className="h-11 w-11 rounded-md object-cover shrink-0"
+              style={{ border: '1.5px solid var(--brand)' }}
+            />
+          ) : (
+            <div className="flex h-11 w-11 items-center justify-center rounded-md shrink-0" style={{ background: 'var(--accent-soft)' }}>
+              <Icon size={22} style={{ color: 'var(--brand)' }} />
+            </div>
+          )}
           <span className="font-[var(--font-heading)] text-[16px] font-semibold tracking-wide" style={{ color: 'var(--heading)' }}>
             {node.label}
           </span>
-          {agent && (
-            <span className="ml-auto h-2.5 w-2.5 rounded-full" style={{ background: statusColor(agent.status) }} />
+          {(agent || activeStatus) && (
+            <span className="ml-auto h-2.5 w-2.5 rounded-full" style={{ background: statusColor(activeStatus || agent?.status) }} />
           )}
         </div>
 

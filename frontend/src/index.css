@@ -148,19 +148,19 @@ body {
 @keyframes maestro-intro-logo {
   0% {
     opacity: 0;
-    transform: translate(-50%, -50%) scale(0.7);
+    transform: scale(0.7);
   }
   20% {
     opacity: 1;
-    transform: translate(-50%, -50%) scale(1);
+    transform: scale(1);
   }
   65% {
     opacity: 1;
-    transform: translate(-50%, -50%) scale(1);
+    transform: scale(1);
   }
   100% {
     opacity: 0;
-    transform: translate(-50%, -50%) scale(0.85);
+    transform: scale(0.85);
   }
 }
 @keyframes maestro-intro-fade {
