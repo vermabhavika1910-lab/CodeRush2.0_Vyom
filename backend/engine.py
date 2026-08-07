@@ -139,6 +139,8 @@ class WorkflowEngine:
             elif ntype == "retry":
                 node_retry_counts[nid] += 1
                 node_states[nid] = "retry"
+            elif ntype == "skipped":
+                node_states[nid] = "skipped"
                 
         # Calculate dependencies
         incoming_edges = {n["id"]: set() for n in nodes}
@@ -162,12 +164,25 @@ class WorkflowEngine:
                 
             # A node is runnable if:
             # - It is currently 'pending' or in 'retry' state
-            # - All parent nodes are in 'success' state
+            # - All parent nodes are in 'success' state (unless it's compensation)
             parents = incoming_edges[nid]
-            all_parents_success = all(node_states[pid] == "success" for pid in parents)
             
-            if (state == "pending" or state == "retry") and all_parents_success:
-                runnable_nodes.append(n)
+            # Propagate skipped state
+            if state == "pending" and parents and any(node_states[pid] == "skipped" for pid in parents):
+                cursor.execute("INSERT INTO events (run_id, node_id, type, payload_json) VALUES (?, ?, 'skipped', ?)", 
+                               (run_id, nid, json.dumps({"reason": "Parent node was skipped"})))
+                conn.commit()
+                node_states[nid] = "skipped"
+                state = "skipped"
+
+            if n["type"] == "compensation":
+                can_run = any(node_states[pid] == "failed" for pid in parents)
+                if state == "pending" and can_run:
+                    runnable_nodes.append(n)
+            else:
+                all_parents_success = all(node_states[pid] == "success" for pid in parents)
+                if (state == "pending" or state == "retry") and all_parents_success:
+                    runnable_nodes.append(n)
 
         # Update run status if blocked
         if has_blocked_nodes:
@@ -178,25 +193,42 @@ class WorkflowEngine:
 
         # If no runnable nodes and no active nodes, let's see if we are done or stuck
         if not runnable_nodes and not has_active_nodes:
-            all_success = all(node_states[n["id"]] == "success" for n in nodes)
-            if all_success:
+            all_success_or_skipped = all(node_states[n["id"]] in ["success", "skipped"] for n in nodes)
+            if all_success_or_skipped:
                 cursor.execute("UPDATE runs SET status = 'success', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
                 conn.commit()
                 conn.close()
                 return "success", []
             else:
-                # Some node failed, or human review is pending
-                is_any_paused = any(node_states[n["id"]] == "paused_review" for n in nodes)
-                if is_any_paused:
-                    cursor.execute("UPDATE runs SET status = 'paused_review' WHERE id = ?", (run_id,))
+                # Check if there are failures that were compensated successfully
+                is_stuck = False
+                for n in nodes:
+                    st = node_states[n["id"]]
+                    if st == "failed":
+                        comp_children = [c for c in nodes if c["type"] == "compensation" and n["id"] in incoming_edges[c["id"]]]
+                        if not comp_children or not any(node_states[c["id"]] == "success" for c in comp_children):
+                            is_stuck = True
+                    elif st not in ["success", "skipped"]:
+                        is_stuck = True
+                        
+                if not is_stuck:
+                    cursor.execute("UPDATE runs SET status = 'success', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
                     conn.commit()
                     conn.close()
-                    return "paused_review", []
+                    return "success", []
                 else:
-                    cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                    conn.commit()
-                    conn.close()
-                    return "failed", []
+                    # Some node failed, or human review is pending
+                    is_any_paused = any(node_states[n["id"]] == "paused_review" for n in nodes)
+                    if is_any_paused:
+                        cursor.execute("UPDATE runs SET status = 'paused_review' WHERE id = ?", (run_id,))
+                        conn.commit()
+                        conn.close()
+                        return "paused_review", []
+                    else:
+                        cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
+                        conn.commit()
+                        conn.close()
+                        return "failed", []
 
         # Execute runnable nodes
         executed_nodes = []
@@ -244,6 +276,18 @@ class WorkflowEngine:
             
             # Resolve Input Template from parent node outputs
             input_payload = WorkflowEngine._resolve_input_template(node["input_template"], node_outputs)
+            
+            if node["type"] == "conditional":
+                condition_val = input_payload.get("condition")
+                # If condition evaluates to false/falsy, skip execution
+                if not condition_val:
+                    cursor.execute("""
+                    INSERT INTO events (run_id, node_id, type, payload_json)
+                    VALUES (?, ?, 'skipped', ?)
+                    """, (run_id, nid, json.dumps({"reason": "Condition evaluated to false"})))
+                    conn.commit()
+                    executed_nodes.append(nid)
+                    continue
             
             # 1. Safety Check: Adversarial Payload Injection Check
             safe_payload, payload_msg = SecurityBroker.sanitize_and_check_payload(input_payload)

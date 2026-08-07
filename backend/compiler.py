@@ -13,7 +13,7 @@ GRAPH_SCHEMA = {
                 "properties": {
                     "id": {"type": "string"},
                     "agent_id": {"type": "string", "enum": ["research_agent", "writer_agent", "verifier_agent", "adversarial_agent"]},
-                    "type": {"type": "string", "enum": ["sequential", "parallel", "conditional", "retry", "human_review"]},
+                    "type": {"type": "string", "enum": ["sequential", "parallel", "conditional", "retry", "human_review", "compensation"]},
                     "label": {"type": "string"},
                     "budget_limit_tokens": {"type": "integer"},
                     "retry_attempts": {"type": "integer"},
@@ -60,8 +60,10 @@ class GraphCompiler:
             "Node execution types are:\n"
             "- 'sequential': Standard node executed in sequence.\n"
             "- 'parallel': Node that can execute concurrently with another node.\n"
+            "- 'conditional': Node that executes conditionally based on a boolean 'condition' field in its input payload.\n"
             "- 'retry': Node that will automatically retry upon failure.\n"
             "- 'human_review': Node that pauses the workflow for human verification and approval.\n"
+            "- 'compensation': Node that runs only if its parent node fails fatally.\n"
             "\n"
             "You must output a JSON object strictly conforming to the requested schema. "
             "Choose a logical, multi-agent layout (e.g. compile research findings, then write, then verify)."
@@ -104,6 +106,7 @@ class GraphCompiler:
         
         # Check if the goal mentions adversarial testing or safety
         is_adversarial_test = "adversarial" in goal_text.lower() or "security" in goal_text.lower() or "hack" in goal_text.lower()
+        is_conditional_test = "conditional" in goal_text.lower() or "compensation" in goal_text.lower()
 
         if is_adversarial_test:
             # Graph specifically for demonstrating the safety boundary / tool-scope escape enforcement
@@ -129,6 +132,41 @@ class GraphCompiler:
             ]
             edges = [
                 {"source": "trigger_node", "target": "monitor_node", "description": "Handoff triggered payload for safety audit"}
+            ]
+        elif is_conditional_test:
+            # Graph for demonstrating conditional and compensation logic
+            nodes = [
+                {
+                    "id": "research_topic_a",
+                    "agent_id": "research_agent",
+                    "type": "sequential",
+                    "label": "Primary Research",
+                    "budget_limit_tokens": 30000,
+                    "retry_attempts": 1,
+                    "input_template": '{"topic": "' + goal_text + '"}'
+                },
+                {
+                    "id": "conditional_check",
+                    "agent_id": "verifier_agent",
+                    "type": "conditional",
+                    "label": "Quality Gate",
+                    "budget_limit_tokens": 10000,
+                    "retry_attempts": 1,
+                    "input_template": '{"draft": "${research_topic_a.findings}", "condition": true}'
+                },
+                {
+                    "id": "compensation_node",
+                    "agent_id": "writer_agent",
+                    "type": "compensation",
+                    "label": "Fallback Writer",
+                    "budget_limit_tokens": 10000,
+                    "retry_attempts": 1,
+                    "input_template": '{"findings": ["Primary research failed, executing fallback."]}'
+                }
+            ]
+            edges = [
+                {"source": "research_topic_a", "target": "conditional_check", "description": "Verify findings"},
+                {"source": "research_topic_a", "target": "compensation_node", "description": "Fallback if research fails"}
             ]
         else:
             # Standard multi-agent research and writing workflow (P0 requirements)
