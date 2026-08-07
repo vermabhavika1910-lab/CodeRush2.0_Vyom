@@ -9,15 +9,39 @@ interface LoginPageProps {
 export function LoginPage({ onLogin }: LoginPageProps) {
   const { push } = useToast();
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPw, setShowPw] = useState(false);
-  const [remember, setRemember] = useState(true);
+  const [otp, setOtp] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [generatedOtp, setGeneratedOtp] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const submit = (e: React.FormEvent) => {
+  const handleSendOtp = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !password.trim()) {
-      push({ title: 'Enter credentials', message: 'Email and password are required.', variant: 'warning' });
+    if (!email.trim()) {
+      push({ title: 'Enter Email', message: 'Email address is required to receive OTP.', variant: 'warning' });
+      return;
+    }
+    setLoading(true);
+    setTimeout(() => {
+      const mockOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      setGeneratedOtp(mockOtp);
+      setLoading(false);
+      setOtpSent(true);
+      push({ 
+        title: 'OTP Sent', 
+        message: `A verification code has been sent. (Mock Code: ${mockOtp})`, 
+        variant: 'success' 
+      });
+    }, 900);
+  };
+
+  const handleVerifyOtp = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!otp.trim()) {
+      push({ title: 'Enter OTP', message: 'Please enter the 6-digit OTP code.', variant: 'warning' });
+      return;
+    }
+    if (otp !== generatedOtp && otp !== '123456') { // Allow 123456 as bypass back-door
+      push({ title: 'Invalid OTP', message: 'The verification code is incorrect.', variant: 'error' });
       return;
     }
     setLoading(true);
@@ -25,7 +49,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       setLoading(false);
       push({ title: 'Welcome back', message: 'Signed in to Maestro (mock).', variant: 'success' });
       onLogin();
-    }, 1100);
+    }, 1000);
   };
 
   return (
@@ -63,82 +87,91 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           style={{ background: 'var(--bg-card)', borderColor: 'var(--border)', boxShadow: 'var(--shadow)' }}
         >
           <h1 className="font-[var(--font-heading)] text-2xl font-semibold" style={{ color: 'var(--heading)' }}>
-            Welcome back
+            {otpSent ? 'Enter OTP Code' : 'Sign In'}
           </h1>
           <p className="mt-1 text-[15px]" style={{ color: 'var(--body-muted)' }}>
-            Sign in to orchestrate your agents.
+            {otpSent ? `Verification code sent to ${email}` : 'Secure sign-in using email OTP.'}
           </p>
 
-          <form onSubmit={submit} className="mt-6 flex flex-col gap-4">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[12px] font-semibold uppercase tracking-wider" style={{ color: 'var(--body-muted)' }}>
-                Email
-              </span>
-              <div className="flex items-center gap-2 rounded-lg border px-3 py-2.5" style={{ borderColor: 'var(--border-soft)', background: 'var(--bg)' }}>
-                <Mail size={16} style={{ color: 'var(--body-muted)' }} />
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@maestro.dev"
-                  className="w-full bg-transparent text-[15px] outline-none"
-                  style={{ color: 'var(--body)' }}
-                />
-              </div>
-            </label>
+          {!otpSent ? (
+            <form onSubmit={handleSendOtp} className="mt-6 flex flex-col gap-4">
+              <label className="flex flex-col gap-1.5">
+                <span className="text-[12px] font-semibold uppercase tracking-wider" style={{ color: 'var(--body-muted)' }}>
+                  Email Address
+                </span>
+                <div className="flex items-center gap-2 rounded-lg border px-3 py-2.5" style={{ borderColor: 'var(--border-soft)', background: 'var(--bg)' }}>
+                  <Mail size={16} style={{ color: 'var(--body-muted)' }} />
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@maestro.dev"
+                    className="w-full bg-transparent text-[15px] outline-none"
+                    style={{ color: 'var(--body)' }}
+                  />
+                </div>
+              </label>
 
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[12px] font-semibold uppercase tracking-wider" style={{ color: 'var(--body-muted)' }}>
-                Password
-              </span>
-              <div className="flex items-center gap-2 rounded-lg border px-3 py-2.5" style={{ borderColor: 'var(--border-soft)', background: 'var(--bg)' }}>
-                <Lock size={16} style={{ color: 'var(--body-muted)' }} />
-                <input
-                  type={showPw ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full bg-transparent text-[15px] outline-none"
-                  style={{ color: 'var(--body)' }}
-                />
-                <button type="button" onClick={() => setShowPw((s) => !s)} className="shrink-0 transition-colors" style={{ color: 'var(--body-muted)' }}>
-                  {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+              <button
+                type="submit"
+                disabled={loading}
+                className="flex items-center justify-center gap-2 rounded-lg py-3 text-[15px] font-semibold transition-all hover:scale-[1.01] disabled:opacity-70 mt-2"
+                style={{ background: 'var(--brand)', color: 'var(--bg)' }}
+              >
+                {loading ? <Loader2 size={16} className="maestro-spin" /> : <ArrowRight size={16} />}
+                {loading ? 'Sending OTP…' : 'Send Verification OTP'}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleVerifyOtp} className="mt-6 flex flex-col gap-4">
+              <label className="flex flex-col gap-1.5">
+                <span className="text-[12px] font-semibold uppercase tracking-wider" style={{ color: 'var(--body-muted)' }}>
+                  Enter 6-Digit OTP
+                </span>
+                <div className="flex items-center gap-2 rounded-lg border px-3 py-2.5" style={{ borderColor: 'var(--border-soft)', background: 'var(--bg)' }}>
+                  <Lock size={16} style={{ color: 'var(--body-muted)' }} />
+                  <input
+                    type="text"
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value)}
+                    placeholder="••••••"
+                    maxLength={6}
+                    className="w-full bg-transparent text-[15px] outline-none tracking-widest text-center font-bold"
+                    style={{ color: 'var(--body)' }}
+                  />
+                </div>
+              </label>
+
+              <div className="flex items-center justify-between">
+                <button 
+                  type="button" 
+                  onClick={() => setOtpSent(false)} 
+                  className="text-[14px] font-medium transition-colors hover:underline" 
+                  style={{ color: 'var(--brand)' }}
+                >
+                  Change Email
+                </button>
+                <button 
+                  type="button" 
+                  onClick={handleSendOtp} 
+                  className="text-[14px] font-medium transition-colors hover:underline" 
+                  style={{ color: 'var(--body-muted)' }}
+                >
+                  Resend OTP
                 </button>
               </div>
-            </label>
 
-            <div className="flex items-center justify-between">
-              <button type="button" onClick={() => setRemember((r) => !r)} className="flex items-center gap-2">
-                <span
-                  className="flex h-4 w-4 items-center justify-center rounded border transition-colors"
-                  style={{
-                    background: remember ? 'var(--accent-strong)' : 'transparent',
-                    borderColor: remember ? 'var(--accent-strong)' : 'var(--border-soft)',
-                  }}
-                >
-                  {remember && (
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                      <path d="M2 5l2 2 4-4" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
-                </span>
-                <span className="text-[14px]" style={{ color: 'var(--body)' }}>Remember me</span>
+              <button
+                type="submit"
+                disabled={loading}
+                className="flex items-center justify-center gap-2 rounded-lg py-3 text-[15px] font-semibold transition-all hover:scale-[1.01] disabled:opacity-70 mt-2"
+                style={{ background: 'var(--brand)', color: 'var(--bg)' }}
+              >
+                {loading ? <Loader2 size={16} className="maestro-spin" /> : <ArrowRight size={16} />}
+                {loading ? 'Verifying…' : 'Verify & Sign In'}
               </button>
-              <button type="button" onClick={() => push({ title: 'Password reset', message: 'Mock: reset link sent.', variant: 'info' })} className="text-[14px] font-medium transition-colors hover:underline" style={{ color: 'var(--brand)' }}>
-                Forgot password?
-              </button>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex items-center justify-center gap-2 rounded-lg py-3 text-[15px] font-semibold transition-all hover:scale-[1.01] disabled:opacity-70"
-              style={{ background: 'var(--brand)', color: 'var(--bg)' }}
-            >
-              {loading ? <Loader2 size={16} className="maestro-spin" /> : <ArrowRight size={16} />}
-              {loading ? 'Signing in…' : 'Sign in'}
-            </button>
-          </form>
+            </form>
+          )}
 
           <div className="my-5 flex items-center gap-3">
             <div className="h-px flex-1" style={{ background: 'var(--border-soft)' }} />
