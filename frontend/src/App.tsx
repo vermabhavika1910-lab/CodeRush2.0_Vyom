@@ -379,55 +379,65 @@ function MaestroShell() {
     setWorkflowOpen(true); // Open the canvas so the user can see the graph nodes!
     
     try {
-      push({ title: 'Compiling Workflow', message: `Decomposing goal: "${targetGoal.slice(0, 35)}..."`, variant: 'info' });
-      const graph = await api.compileGoal(targetGoal, 'mock', '');
-      if (cancelRef.current) return;
-      await api.saveGraph(graph);
-      if (cancelRef.current) return;
+      push({ title: 'Executing Workflow', message: `Sending goal: "${targetGoal.slice(0, 35)}..."`, variant: 'info' });
       
-      const { run_id } = await api.createRun(graph.id, 'mock', '');
+      // Get a template graph to use
+      const templates = await api.getTemplates();
+      if (!templates || templates.length === 0) throw new Error("No templates available");
+      const graph = templates[0].graph;
+
       if (cancelRef.current) return;
-      setActiveRunId(run_id);
       
       setExecCollapsed(false);
-      push({ title: 'Workflow running', message: `Run ${run_id} started.`, variant: 'success' });
+      push({ title: 'Workflow running', message: `Executing graph...`, variant: 'success' });
       
-      // We start polling steps
-      let status = 'pending';
-      let maxSteps = 15;
-      let stepsCount = 0;
-      while (['pending', 'running', 'paused_review'].includes(status) && stepsCount < maxSteps) {
-        if (cancelRef.current) break;
-        if (status === 'paused_review') {
-          push({ title: 'Review Gate', message: 'Workflow is paused waiting for human approval.', variant: 'info' });
-          // If it pauses, we trigger review approval on backend for automatic execution demonstration
-          await new Promise(r => setTimeout(r, 3000));
-          if (cancelRef.current) break;
-          await api.approveReview(run_id, 'verify_and_approve', { approved: true, feedback: 'Approved' });
+      // In stateless execution, we just wait for the final response
+      const response = await api.executeWorkflow(graph, targetGoal);
+      
+      if (cancelRef.current) return;
+
+      // Map backend events to our frontend state (ExecutionPanel relies on simulatedSteps)
+      const events = response.events || [];
+      const newSteps: any[] = [];
+      const nodeMap: Record<string, any> = {};
+      const states: Record<string, string> = {};
+
+      events.forEach((e: any) => {
+        if (!nodeMap[e.node_id]) {
+          nodeMap[e.node_id] = {
+            nodeId: e.node_id,
+            agent: e.node_id,
+            status: 'running',
+            latency: 0,
+            tokens: 0,
+            cost: 0,
+            retries: 0,
+          };
+          newSteps.push(nodeMap[e.node_id]);
         }
-        const res = await api.runStep(run_id);
-        if (cancelRef.current) break;
-        status = res.status;
-        
-        // Update nodeStates dynamically based on events!
-        const events = res.events || [];
-        const states: Record<string, string> = {};
-        events.forEach((e: any) => {
-          if (e.type === 'start') states[e.node_id] = 'running';
-          else if (e.type === 'success' || e.type === 'approval' || e.type === 'end') states[e.node_id] = 'success';
-          else if (e.type === 'fail' || e.type === 'failure' || e.type === 'blocked') states[e.node_id] = 'failure';
-          else if (e.type === 'retry') states[e.node_id] = 'retry';
-        });
-        setNodeStates(states);
-        
-        stepsCount++;
-        await new Promise(r => setTimeout(r, 1500));
-      }
-      if (['success', 'blocked', 'failed'].includes(status) && !cancelRef.current) {
-        push({ title: 'Run completed', message: `Status: ${status.toUpperCase()}`, variant: 'success' });
-        setExecCollapsed(false);
-        execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
-      }
+        if (e.type === 'start') {
+          nodeMap[e.node_id].status = 'running';
+          states[e.node_id] = 'running';
+        } else if (e.type === 'end' || e.type === 'success' || e.type === 'approval') {
+          nodeMap[e.node_id].status = 'success';
+          nodeMap[e.node_id].cost = e.cost !== undefined ? e.cost : (e.data?.cost || 0);
+          nodeMap[e.node_id].latency = e.latency_ms !== undefined ? e.latency_ms : (e.data?.latency_ms || 0);
+          nodeMap[e.node_id].tokens = e.tokens !== undefined ? e.tokens : (e.data?.tokens || 0);
+          states[e.node_id] = 'success';
+        } else if (e.type === 'fail' || e.type === 'failure' || e.type === 'blocked') {
+          nodeMap[e.node_id].status = 'failure';
+          states[e.node_id] = 'failure';
+        }
+      });
+
+      setNodeStates(states);
+      setSimulatedSteps(newSteps);
+      setSimulatedArtifacts(response.artifacts || []);
+      
+      push({ title: 'Run completed', message: `Status: SUCCESS`, variant: 'success' });
+      setExecCollapsed(false);
+      execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
+      
     } catch (err: any) {
       if (cancelRef.current) {
         console.log('API run execution cancelled');

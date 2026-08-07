@@ -9,22 +9,8 @@ export function RunHistory() {
   const [runs, setRuns] = useState<RunRecord[]>([]);
 
   useEffect(() => {
-    api.listRuns().then((data) => {
-      // Map API data to RunRecord format if needed
-      setRuns(data.map((r: any) => ({
-        id: r.id,
-        name: r.goal_text || 'Unnamed Run',
-        timestamp: r.started_at,
-        status: r.status === 'success' ? 'success' : r.status === 'error' ? 'failure' : 'partial',
-        cost: r.total_cost || 0,
-        latency: (r.total_latency_ms || 0) / 1000,
-        retries: 0,
-        verification: 100, // mock verification score
-      })));
-    }).catch((err) => {
-      console.error(err);
-      push({ title: 'Error fetching runs', message: err.message, variant: 'error' });
-    });
+    // Run history is disabled in stateless backend execution mode.
+    setRuns([]);
   }, []);
 
   const replay = (r: RunRecord) => {

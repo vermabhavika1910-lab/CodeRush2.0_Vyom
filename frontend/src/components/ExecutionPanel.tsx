@@ -43,47 +43,7 @@ export function ExecutionPanel({ collapsed, onToggle, height, activeRunId, simul
       }
       return;
     }
-    if (!activeRunId) return;
-    const interval = setInterval(() => {
-      api.getRun(activeRunId).then((data) => {
-        // Transform backend events into steps format
-        const events = data.events || [];
-        const newSteps: any[] = [];
-        const nodeMap: Record<string, any> = {};
-
-        events.forEach((e: any) => {
-          if (!nodeMap[e.node_id]) {
-            nodeMap[e.node_id] = {
-              nodeId: e.node_id,
-              agent: e.node_id,
-              status: 'running',
-              latency: 0,
-              tokens: 0,
-              cost: 0,
-              retries: 0,
-            };
-            newSteps.push(nodeMap[e.node_id]);
-          }
-          if (e.type === 'start') {
-            nodeMap[e.node_id].status = 'running';
-          } else if (e.type === 'end' || e.type === 'success' || e.type === 'approval') {
-            nodeMap[e.node_id].status = 'success';
-            nodeMap[e.node_id].cost = e.cost !== undefined ? e.cost : (e.data?.cost || 0);
-            nodeMap[e.node_id].latency = e.latency_ms !== undefined ? e.latency_ms : (e.data?.latency_ms || 0);
-            nodeMap[e.node_id].tokens = e.tokens !== undefined ? e.tokens : (e.data?.tokens || 0);
-          } else if (e.type === 'fail' || e.type === 'failure' || e.type === 'blocked') {
-            nodeMap[e.node_id].status = 'failure';
-          } else if (e.type === 'retry') {
-            nodeMap[e.node_id].status = 'retry';
-            nodeMap[e.node_id].retries = (nodeMap[e.node_id].retries || 0) + 1;
-          }
-        });
-        setSteps(newSteps);
-        setArtifacts(data.artifacts || []);
-      }).catch(console.error);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [activeRunId, simulatedSteps, simulatedArtifacts]);
+  }, [simulatedSteps, simulatedArtifacts]);
 
   const retry = (nodeId: string) => {
     setSteps((s) => s.map((st) => (st.nodeId === nodeId ? { ...st, status: 'running' as AgentStatus } : st)));
