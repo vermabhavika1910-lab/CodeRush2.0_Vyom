@@ -1349,7 +1349,7 @@ export default function App() {
                     <div className="relative w-full h-full flex flex-col md:flex-row items-center justify-around gap-6 p-4">
                       {/* We render a beautiful simple static node graph */}
                       {/* Topic A & B in left column, Draft in middle, Verifier in right */}
-                      {compiledGraph.nodes.some(n => n.id === 'trigger_node') ? (
+                      {compiledGraph.nodes.some(n => n && n.id === 'trigger_node') ? (
                         // Adversarial Attack Flow (2 nodes)
                         <div className="flex items-center justify-center gap-16">
                           {compiledGraph.nodes.map((node) => {
@@ -1375,7 +1375,7 @@ export default function App() {
                           
                           {/* Column 1: Parallel Research Nodes */}
                           <div className="flex flex-col gap-6 z-10">
-                            {compiledGraph.nodes.filter(n => n.id.startsWith('research_')).map(node => {
+                            {compiledGraph.nodes.filter(n => n && n.id && n.id.startsWith('research_')).map(node => {
                               const state = getNodeState(node.id);
                               return (
                                 <div key={node.id} className={`node-card ${state}`}>
@@ -1400,7 +1400,7 @@ export default function App() {
 
                           {/* Column 2: Join & Draft Writing */}
                           <div className="z-10">
-                            {compiledGraph.nodes.filter(n => n.id === 'write_draft').map(node => {
+                            {compiledGraph.nodes.filter(n => n && n.id === 'write_draft').map(node => {
                               const state = getNodeState(node.id);
                               return (
                                 <div key={node.id} className={`node-card ${state}`}>
@@ -1425,7 +1425,7 @@ export default function App() {
 
                           {/* Column 3: Quality Verification / Human review */}
                           <div className="z-10">
-                            {compiledGraph.nodes.filter(n => n.id === 'verify_and_approve').map(node => {
+                            {compiledGraph.nodes.filter(n => n && n.id === 'verify_and_approve').map(node => {
                               const state = getNodeState(node.id);
                               return (
                                 <div key={node.id} className={`node-card ${state}`}>
