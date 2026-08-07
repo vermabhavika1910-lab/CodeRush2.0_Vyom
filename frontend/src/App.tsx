@@ -376,12 +376,11 @@ function MaestroShell() {
     setSimulatedSteps(undefined);
     setSimulatedArtifacts(undefined);
     setNodeStates({});
-    setWorkflowOpen(true); // Open the canvas so the user can see the graph nodes!
+    setWorkflowOpen(true);
     
     try {
       push({ title: 'Executing Workflow', message: `Sending goal: "${targetGoal.slice(0, 35)}..."`, variant: 'info' });
       
-      // Get a template graph to use
       const templates = await api.getTemplates();
       if (!templates || templates.length === 0) throw new Error("No templates available");
       const graph = templates[0].graph;
@@ -389,52 +388,73 @@ function MaestroShell() {
       if (cancelRef.current) return;
       
       setExecCollapsed(false);
-      push({ title: 'Workflow running', message: `Executing graph...`, variant: 'success' });
+      push({ title: 'Workflow started', message: `Creating run execution...`, variant: 'success' });
       
-      // In stateless execution, we just wait for the final response
-      const response = await api.executeWorkflow(graph, targetGoal);
+      // Step 1: Create stateful run on backend
+      const { run_id } = await api.createRun(graph, targetGoal);
+      setActiveRunId(run_id);
       
-      if (cancelRef.current) return;
+      let runState = await api.getRunStatus(run_id);
+      
+      // Step 2: Poll steps dynamically
+      while (runState.status === 'pending' || runState.status === 'running') {
+        if (cancelRef.current) break;
+        
+        // Execute the next step
+        runState = await api.runStep(run_id);
+        
+        const steps = runState.step_results || [];
+        const newSteps: any[] = [];
+        const states: Record<string, string> = {};
 
-      // Map backend events to our frontend state (ExecutionPanel relies on simulatedSteps)
-      const events = response.events || [];
-      const newSteps: any[] = [];
-      const nodeMap: Record<string, any> = {};
-      const states: Record<string, string> = {};
+        steps.forEach((step: any) => {
+          const nodeId = step.node_id;
+          const status = step.status === 'completed' ? 'success' : step.status === 'failed' ? 'failure' : step.status;
+          states[nodeId] = status;
+          newSteps.push({
+            nodeId,
+            agent: step.node_label,
+            status,
+            latency: step.execution_time_ms,
+            tokens: step.details?.tokens || 0,
+            cost: step.details?.cost || 0,
+            retries: step.details?.retries || 0
+          });
+        });
 
-      events.forEach((e: any) => {
-        if (!nodeMap[e.node_id]) {
-          nodeMap[e.node_id] = {
-            nodeId: e.node_id,
-            agent: e.node_id,
-            status: 'running',
-            latency: 0,
-            tokens: 0,
-            cost: 0,
-            retries: 0,
-          };
-          newSteps.push(nodeMap[e.node_id]);
+        // Set the active node (next up in queue) to running for UX
+        if (runState.status === 'running' && runState.queue && runState.queue.length > 0) {
+          const nextNodeId = runState.queue[0];
+          states[nextNodeId] = 'running';
         }
-        if (e.type === 'start') {
-          nodeMap[e.node_id].status = 'running';
-          states[e.node_id] = 'running';
-        } else if (e.type === 'end' || e.type === 'success' || e.type === 'approval') {
-          nodeMap[e.node_id].status = 'success';
-          nodeMap[e.node_id].cost = e.cost !== undefined ? e.cost : (e.data?.cost || 0);
-          nodeMap[e.node_id].latency = e.latency_ms !== undefined ? e.latency_ms : (e.data?.latency_ms || 0);
-          nodeMap[e.node_id].tokens = e.tokens !== undefined ? e.tokens : (e.data?.tokens || 0);
-          states[e.node_id] = 'success';
-        } else if (e.type === 'fail' || e.type === 'failure' || e.type === 'blocked') {
-          nodeMap[e.node_id].status = 'failure';
-          states[e.node_id] = 'failure';
-        }
-      });
 
-      setNodeStates(states);
-      setSimulatedSteps(newSteps);
-      setSimulatedArtifacts(response.artifacts || []);
+        setNodeStates(states);
+        setSimulatedSteps(newSteps);
+        
+        // Map outputs as artifacts
+        const artifactsList: any[] = [];
+        Object.keys(runState.outputs || {}).forEach((nid) => {
+          artifactsList.push({
+            id: `art_${run_id}_${nid}`,
+            node_id: nid,
+            schema_ref: 'schema',
+            payload_json: runState.outputs[nid]
+          });
+        });
+        setSimulatedArtifacts(artifactsList);
+
+        // Sleep briefly between steps for visual progression
+        await new Promise(r => setTimeout(r, 1000));
+      }
       
-      push({ title: 'Run completed', message: `Status: SUCCESS`, variant: 'success' });
+      if (runState.status === 'completed') {
+        push({ title: 'Run completed', message: 'Workflow finished successfully.', variant: 'success' });
+      } else if (runState.status === 'blocked') {
+        push({ title: 'Run Blocked', message: 'Security violation blocked.', variant: 'error' });
+      } else {
+        push({ title: 'Run Failed', message: 'Workflow execution failed.', variant: 'error' });
+      }
+      
       setExecCollapsed(false);
       execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
       

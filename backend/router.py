@@ -14,6 +14,47 @@ async def run_workflow(request: ExecutionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
 
+@router.post("/runs")
+async def create_run(request: ExecutionRequest):
+    try:
+        run_id = await engine.create_run(request.graph, request.input_text or "")
+        return {"run_id": run_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create run: {str(e)}")
+
+@router.post("/runs/{run_id}/step")
+async def run_step(run_id: str):
+    try:
+        result = await engine.execute_step(run_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to execute step: {str(e)}")
+
+@router.get("/runs/{run_id}")
+async def get_run_status(run_id: str):
+    from state_store import state_store
+    run_state = state_store.get_execution(run_id)
+    if not run_state:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run_state
+
+@router.get("/runs")
+async def list_runs():
+    from state_store import state_store
+    run_ids = state_store.list_executions()
+    runs_list = []
+    for rid in run_ids:
+        state = state_store.get_execution(rid)
+        if state:
+            runs_list.append({
+                "id": rid,
+                "status": state["status"],
+                "goal": state["initial_input"],
+                "steps_count": len(state["step_results"]),
+                "total_steps": len(state["nodes_by_id"])
+            })
+    return runs_list
+
 @router.post("/workflow/validate")
 async def validate_workflow(graph: WorkflowGraph):
     nodes_count = len(graph.nodes)

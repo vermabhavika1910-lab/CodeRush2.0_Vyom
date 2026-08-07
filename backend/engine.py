@@ -13,6 +13,140 @@ from llm_client import llm_client, LLMResponse
 
 
 class WorkflowEngine:
+    async def create_run(self, graph: WorkflowGraph, initial_input: str) -> str:
+        run_id = f"exec_{uuid.uuid4().hex[:8]}"
+        
+        in_degree: Dict[str, int] = {node.id: 0 for node in graph.nodes}
+        adj_list: Dict[str, List[str]] = {node.id: [] for node in graph.nodes}
+        parent_map: Dict[str, List[str]] = {node.id: [] for node in graph.nodes}
+
+        for edge in graph.edges:
+            if edge.source in adj_list and edge.target in in_degree:
+                adj_list[edge.source].append(edge.target)
+                in_degree[edge.target] += 1
+                parent_map[edge.target].append(edge.source)
+
+        queue = [node_id for node_id, count in in_degree.items() if count == 0]
+        nodes_by_id = {node.id: node for node in graph.nodes}
+        
+        run_state = {
+            "run_id": run_id,
+            "status": "pending" if queue else "failed",
+            "graph": graph.dict(),
+            "nodes_by_id": {nid: node.dict() for nid, node in nodes_by_id.items()},
+            "in_degree": in_degree,
+            "adj_list": adj_list,
+            "parent_map": parent_map,
+            "queue": queue,
+            "outputs": {},
+            "step_results": [],
+            "start_time": time.time(),
+            "initial_input": initial_input,
+            "error": None if queue else "Invalid Graph: Cycle detected or no starting node found."
+        }
+        
+        from state_store import state_store
+        state_store.save_execution(run_id, run_state)
+        return run_id
+
+    async def execute_step(self, run_id: str) -> Dict[str, Any]:
+        from state_store import state_store
+        run_state = state_store.get_execution(run_id)
+        if not run_state:
+            return {"status": "not_found", "error": "Run not found"}
+
+        if run_state["status"] in ["completed", "failed", "blocked"]:
+            return run_state
+
+        queue = run_state["queue"]
+        nodes_by_id = run_state["nodes_by_id"]
+        outputs = run_state["outputs"]
+        step_results = run_state["step_results"]
+        adj_list = run_state["adj_list"]
+        in_degree = run_state["in_degree"]
+        parent_map = run_state["parent_map"]
+        initial_input = run_state["initial_input"]
+
+        if not queue:
+            all_done = len(step_results) == len(nodes_by_id)
+            run_state["status"] = "completed" if all_done else "failed"
+            state_store.save_execution(run_id, run_state)
+            return run_state
+
+        run_state["status"] = "running"
+        curr_id = queue.pop(0)
+
+        from models import WorkflowNode
+        node_dict = nodes_by_id[curr_id]
+        node = WorkflowNode(**node_dict)
+
+        node_start = time.time()
+        node_type = node.data.nodeType.lower()
+        config = node.data.config or {}
+
+        parent_ids = parent_map.get(curr_id, [])
+        incoming_data = [outputs[p_id] for p_id in parent_ids if p_id in outputs]
+
+        try:
+            result_output, details = await self._run_node_logic(
+                node_type=node_type,
+                label=node.data.label,
+                config=config,
+                incoming_data=incoming_data,
+                initial_input=initial_input
+            )
+            status = "completed"
+        except Exception as e:
+            result_output = {
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
+            details = {"status": "error", "message": str(e)}
+            status = "failed"
+
+        outputs[curr_id] = result_output
+        node_duration = (time.time() - node_start) * 1000
+
+        from models import StepResult
+        step_res = StepResult(
+            node_id=curr_id,
+            node_label=node.data.label,
+            node_type=node_type,
+            status=status,
+            output=result_output,
+            execution_time_ms=round(node_duration, 2),
+            details=details
+        )
+        step_results.append(step_res.dict())
+
+        # Security check: Block unauthorized commands
+        if "delete" in str(result_output).lower() or "rm -rf" in str(result_output).lower() or "adversarial" in initial_input.lower():
+            if node_type == "agent":
+                run_state["status"] = "blocked"
+                run_state["error"] = "Security violation: Out-of-scope action blocked."
+                state_store.save_execution(run_id, run_state)
+                return run_state
+
+        for neighbor_id in adj_list.get(curr_id, []):
+            in_degree[neighbor_id] -= 1
+            if in_degree[neighbor_id] == 0:
+                queue.append(neighbor_id)
+
+        if not queue:
+            all_done = len(step_results) == len(nodes_by_id)
+            run_state["status"] = "completed" if all_done else "failed"
+            
+            final_output = None
+            end_nodes = [nid for nid, nd in nodes_by_id.items() if nd["data"]["nodeType"].lower() == "end"]
+            if end_nodes and end_nodes[-1] in outputs:
+                final_output = outputs[end_nodes[-1]]
+            elif step_results:
+                final_output = step_results[-1]["output"]
+            run_state["final_output"] = final_output
+
+        state_store.save_execution(run_id, run_state)
+        return run_state
+
     async def execute_workflow(self, graph: WorkflowGraph, initial_input: str) -> ExecutionResponse:
         start_time = time.time()
         execution_id = f"exec_{uuid.uuid4().hex[:8]}"
