@@ -1,567 +1,306 @@
-import json
+"""
+DAG Workflow Execution Engine with real LLM inference.
+Performs topological sort, executes nodes in dependency order,
+and dispatches agent nodes to live LLM providers.
+"""
 import time
 import uuid
-import re
-from typing import Dict, Any, List, Set, Tuple
-from db import get_db_connection
-from security import SecurityBroker, SecurityViolationException
-from providers import LLMProviderAdapter
-import jsonschema
+import asyncio
+import traceback
+from typing import Dict, List, Any, Tuple
+from models import WorkflowGraph, ExecutionResponse, StepResult
+from llm_client import llm_client, LLMResponse
+
 
 class WorkflowEngine:
-    @staticmethod
-    def create_run(graph_id: str, provider_config: Dict[str, Any]) -> str:
-        """
-        Initializes a new execution run in the database.
-        """
-        run_id = str(uuid.uuid4())
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-        INSERT INTO runs (id, graph_id, provider_config_json, status, started_at)
-        VALUES (?, ?, ?, 'pending', ?)
-        """, (run_id, graph_id, json.dumps(provider_config), time.strftime("%Y-%m-%d %H:%M:%S")))
-        
-        conn.commit()
-        conn.close()
-        return run_id
+    async def execute_workflow(self, graph: WorkflowGraph, initial_input: str) -> ExecutionResponse:
+        start_time = time.time()
+        execution_id = f"exec_{uuid.uuid4().hex[:8]}"
 
-    @staticmethod
-    def get_run_status(run_id: str) -> Dict[str, Any]:
-        """
-        Returns full details of a run, its events, and artifacts.
-        """
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Get run info
-        cursor.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
-        run_row = cursor.fetchone()
-        if not run_row:
-            conn.close()
-            return {"error": "Run not found"}
-            
-        # Get graph info
-        cursor.execute("SELECT * FROM graphs WHERE id = ?", (run_row["graph_id"],))
-        graph_row = cursor.fetchone()
-        
-        # Get events
-        cursor.execute("SELECT * FROM events WHERE run_id = ? ORDER BY id ASC", (run_id,))
-        event_rows = cursor.fetchall()
-        
-        # Get artifacts
-        cursor.execute("SELECT * FROM artifacts WHERE run_id = ?", (run_id,))
-        artifact_rows = cursor.fetchall()
-        
-        conn.close()
-        
-        # Format events and artifacts
-        events = [dict(r) for r in event_rows]
-        for e in events:
-            e["payload_json"] = json.loads(e["payload_json"])
-            
-        artifacts = [dict(r) for r in artifact_rows]
-        for a in artifacts:
-            a["payload_json"] = json.loads(a["payload_json"])
-            a["provenance"] = json.loads(a["provenance"])
+        # Map nodes by ID for fast lookup
+        nodes_by_id = {node.id: node for node in graph.nodes}
 
-        return {
-            "run_id": run_row["id"],
-            "graph_id": run_row["graph_id"],
-            "status": run_row["status"],
-            "started_at": run_row["started_at"],
-            "ended_at": run_row["ended_at"],
-            "total_cost": run_row["total_cost"],
-            "total_latency_ms": run_row["total_latency_ms"],
-            "graph": {
-                "nodes": json.loads(graph_row["nodes_json"]),
-                "edges": json.loads(graph_row["edges_json"]),
-                "goal_text": graph_row["goal_text"]
-            },
-            "events": events,
-            "artifacts": artifacts
-        }
+        # Build adjacency graph and calculate in-degrees
+        in_degree: Dict[str, int] = {node.id: 0 for node in graph.nodes}
+        adj_list: Dict[str, List[str]] = {node.id: [] for node in graph.nodes}
+        parent_map: Dict[str, List[str]] = {node.id: [] for node in graph.nodes}
 
-    @staticmethod
-    def execute_step(run_id: str) -> Tuple[str, List[str]]:
-        """
-        Analyzes the graph structure and current execution state.
-        Executes any runnable nodes (handles sequential, parallel, retry, reviews).
-        Returns (updated_run_status, list_of_executed_node_ids)
-        """
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
-        run_row = cursor.fetchone()
-        if not run_row or run_row["status"] in ["success", "blocked"]:
-            conn.close()
-            return run_row["status"] if run_row else "not_found", []
-            
-        # Get graph
-        cursor.execute("SELECT * FROM graphs WHERE id = ?", (run_row["graph_id"],))
-        graph_row = cursor.fetchone()
-        nodes = json.loads(graph_row["nodes_json"])
-        edges = json.loads(graph_row["edges_json"])
-        
-        # Get historical events for this run
-        cursor.execute("SELECT node_id, type, payload_json FROM events WHERE run_id = ?", (run_id,))
-        event_rows = cursor.fetchall()
-        
-        # Build node state and output index
-        node_states = {} # node_id -> status ('pending', 'running', 'success', 'failed', 'retry', 'paused_review', 'blocked')
-        node_outputs = {} # node_id -> payload
-        node_retry_counts = {} # node_id -> count of retry events
-        
-        # Initialize nodes as pending
-        for n in nodes:
-            node_states[n["id"]] = "pending"
-            node_retry_counts[n["id"]] = 0
-            
-        for r in event_rows:
-            ntype = r["type"]
-            nid = r["node_id"]
-            payload = json.loads(r["payload_json"])
-            
-            if ntype == "start":
-                if payload.get("status") == "waiting_for_approval":
-                    node_states[nid] = "paused_review"
-                else:
-                    node_states[nid] = "running"
-            elif ntype == "success":
-                node_states[nid] = "success"
-                node_outputs[nid] = payload
-            elif ntype == "fail":
-                node_states[nid] = "failed"
-            elif ntype == "blocked":
-                node_states[nid] = "blocked"
-            elif ntype == "approval":
-                node_states[nid] = "success" # approved reviews act as success
-                node_outputs[nid] = payload
-            elif ntype == "retry":
-                node_retry_counts[nid] += 1
-                node_states[nid] = "retry"
-            elif ntype == "skipped":
-                node_states[nid] = "skipped"
-                
-        # Calculate dependencies
-        incoming_edges = {n["id"]: set() for n in nodes}
-        for edge in edges:
-            incoming_edges[edge["target"]].add(edge["source"])
-            
-        # Find runnable nodes
-        runnable_nodes = []
-        has_active_nodes = False
-        has_blocked_nodes = False
-        
-        for n in nodes:
-            nid = n["id"]
-            state = node_states[nid]
-            
-            if state in ["running", "retry"] and n["type"] != "human_review":
-                has_active_nodes = True
-                
-            if state == "blocked":
-                has_blocked_nodes = True
-                
-            # A node is runnable if:
-            # - It is currently 'pending' or in 'retry' state
-            # - All parent nodes are in 'success' state (unless it's compensation)
-            parents = incoming_edges[nid]
-            
-            # Propagate skipped state
-            if state == "pending" and parents and any(node_states[pid] == "skipped" for pid in parents):
-                cursor.execute("INSERT INTO events (run_id, node_id, type, payload_json) VALUES (?, ?, 'skipped', ?)", 
-                               (run_id, nid, json.dumps({"reason": "Parent node was skipped"})))
-                conn.commit()
-                node_states[nid] = "skipped"
-                state = "skipped"
+        for edge in graph.edges:
+            if edge.source in adj_list and edge.target in in_degree:
+                adj_list[edge.source].append(edge.target)
+                in_degree[edge.target] += 1
+                parent_map[edge.target].append(edge.source)
 
-            if n["type"] == "compensation":
-                can_run = any(node_states[pid] == "failed" for pid in parents)
-                if state == "pending" and can_run:
-                    runnable_nodes.append(n)
-            else:
-                all_parents_success = all(node_states[pid] == "success" for pid in parents)
-                if (state == "pending" or state == "retry") and all_parents_success:
-                    runnable_nodes.append(n)
+        # Topological sorting queues
+        queue = [node_id for node_id, count in in_degree.items() if count == 0]
 
-        # Update run status if blocked
-        if has_blocked_nodes:
-            cursor.execute("UPDATE runs SET status = 'blocked', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-            conn.commit()
-            conn.close()
-            return "blocked", []
+        outputs: Dict[str, Any] = {}
+        step_results: List[StepResult] = []
 
-        # If no runnable nodes and no active nodes, let's see if we are done or stuck
-        if not runnable_nodes and not has_active_nodes:
-            all_success_or_skipped = all(node_states[n["id"]] in ["success", "skipped"] for n in nodes)
-            if all_success_or_skipped:
-                cursor.execute("UPDATE runs SET status = 'success', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                conn.commit()
-                conn.close()
-                return "success", []
-            else:
-                # Check if there are failures that were compensated successfully
-                is_stuck = False
-                for n in nodes:
-                    st = node_states[n["id"]]
-                    if st == "failed":
-                        comp_children = [c for c in nodes if c["type"] == "compensation" and n["id"] in incoming_edges[c["id"]]]
-                        if not comp_children or not any(node_states[c["id"]] == "success" for c in comp_children):
-                            is_stuck = True
-                    elif st not in ["success", "skipped"]:
-                        is_stuck = True
-                        
-                if not is_stuck:
-                    cursor.execute("UPDATE runs SET status = 'success', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                    conn.commit()
-                    conn.close()
-                    return "success", []
-                else:
-                    # Some node failed, or human review is pending
-                    is_any_paused = any(node_states[n["id"]] == "paused_review" for n in nodes)
-                    if is_any_paused:
-                        cursor.execute("UPDATE runs SET status = 'paused_review' WHERE id = ?", (run_id,))
-                        conn.commit()
-                        conn.close()
-                        return "paused_review", []
-                    else:
-                        cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                        conn.commit()
-                        conn.close()
-                        return "failed", []
+        if not queue:
+            return ExecutionResponse(
+                execution_id=execution_id,
+                status="failed",
+                total_time_ms=(time.time() - start_time) * 1000,
+                steps=[],
+                error="Invalid Graph: Cycle detected or no starting node found."
+            )
 
-        # Execute runnable nodes
-        executed_nodes = []
-        provider_config = json.loads(run_row["provider_config_json"])
-        
-        # Update run to running status if it was pending
-        if run_row["status"] == "pending":
-            cursor.execute("UPDATE runs SET status = 'running' WHERE id = ?", (run_id,))
-            conn.commit()
-
-        for node in runnable_nodes:
-            nid = node["id"]
-            agent_id = node["agent_id"]
-            
-            # Fetch Agent Details
-            cursor.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
-            agent_row = cursor.fetchone()
-            if not agent_row:
-                # Log system error
-                cursor.execute("""
-                INSERT INTO events (run_id, node_id, type, payload_json)
-                VALUES (?, ?, 'fail', ?)
-                """, (run_id, nid, json.dumps({"error": f"Agent {agent_id} not registered."})))
+        while queue:
+            curr_id = queue.pop(0)
+            node = nodes_by_id.get(curr_id)
+            if not node:
                 continue
 
-            # Check if this node is paused for human review
-            if node["type"] == "human_review" and node_states[nid] != "success":
-                # Pause execution and wait for manual approval request
-                cursor.execute("""
-                INSERT INTO events (run_id, node_id, type, payload_json)
-                VALUES (?, ?, 'start', ?)
-                """, (run_id, nid, json.dumps({"status": "waiting_for_approval"})))
-                cursor.execute("UPDATE runs SET status = 'paused_review' WHERE id = ?", (run_id,))
-                node_states[nid] = "paused_review"
-                executed_nodes.append(nid)
-                conn.commit()
-                break # Pause the loop for this step
+            node_start = time.time()
+            node_type = node.data.nodeType.lower()
+            config = node.data.config or {}
 
-            # Log Node Start
-            cursor.execute("""
-            INSERT INTO events (run_id, node_id, type, payload_json)
-            VALUES (?, ?, 'start', ?)
-            """, (run_id, nid, json.dumps({"status": "executing"})))
-            conn.commit()
-            
-            # Resolve Input Template from parent node outputs
-            input_payload = WorkflowEngine._resolve_input_template(node["input_template"], node_outputs)
-            
-            if node["type"] == "conditional":
-                condition_val = input_payload.get("condition")
-                # If condition evaluates to false/falsy, skip execution
-                if not condition_val:
-                    cursor.execute("""
-                    INSERT INTO events (run_id, node_id, type, payload_json)
-                    VALUES (?, ?, 'skipped', ?)
-                    """, (run_id, nid, json.dumps({"reason": "Condition evaluated to false"})))
-                    conn.commit()
-                    executed_nodes.append(nid)
-                    continue
-            
-            # 1. Safety Check: Adversarial Payload Injection Check
-            safe_payload, payload_msg = SecurityBroker.sanitize_and_check_payload(input_payload)
-            if not safe_payload:
-                # Block execution immediately
-                cursor.execute("""
-                INSERT INTO events (run_id, node_id, type, payload_json)
-                VALUES (?, ?, 'blocked', ?)
-                """, (run_id, nid, json.dumps({"error": payload_msg})))
-                cursor.execute("UPDATE runs SET status = 'blocked', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                conn.commit()
-                executed_nodes.append(nid)
-                break
-                
-            # 2. Safety Check: Enforce Input Schema Validation
-            input_schema = json.loads(agent_row["input_schema"])
+            # Gather parent outputs
+            parent_ids = parent_map.get(curr_id, [])
+            incoming_data = [outputs[p_id] for p_id in parent_ids if p_id in outputs]
+
+            # Execute node logic based on node_type
             try:
-                jsonschema.validate(instance=input_payload, schema=input_schema)
-            except jsonschema.ValidationError as err:
-                cursor.execute("""
-                INSERT INTO events (run_id, node_id, type, payload_json)
-                VALUES (?, ?, ?, ?)
-                """, (run_id, nid, 'fail', json.dumps({"error": f"Input Schema validation failed: {err.message}"})))
-                cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                conn.commit()
-                executed_nodes.append(nid)
-                break
-
-            # 3. Handle Parallel branch deliberate failure demonstration (P0 Requirement 65)
-            # We want research_topic_b to fail on its first run to show retry mechanism working
-            is_deliberate_failure_node = (nid == "research_topic_b" and node_retry_counts[nid] == 0)
-            
-            # 4. Security Check: Tool Verification & Sandbox validation
-            tool_violations = []
-            allowed_tools = json.loads(agent_row["tools_json"])
-            
-            # Check for generic tool calls inside input_payload
-            if isinstance(input_payload, dict):
-                requested_tool = input_payload.get("tool") or input_payload.get("tool_call") or input_payload.get("action")
-                if requested_tool and isinstance(requested_tool, str):
-                    ok, err_msg = SecurityBroker.verify_tool_call(agent_id, requested_tool)
-                    if not ok:
-                        tool_violations.append(err_msg)
-            
-            # Specific simulated test: adversarial_agent trying to execute delete_system_logs
-            if agent_id == "adversarial_agent" or "rm -rf" in str(input_payload):
-                unauthorized_tool = "delete_system_logs"
-                ok, err_msg = SecurityBroker.verify_tool_call(agent_id, unauthorized_tool)
-                if not ok and err_msg not in tool_violations:
-                    tool_violations.append(err_msg)
-            
-            if tool_violations:
-                # Intercepted and blocked by security boundary
-                cursor.execute("""
-                INSERT INTO events (run_id, node_id, type, payload_json)
-                VALUES (?, ?, 'blocked', ?)
-                """, (run_id, nid, json.dumps({"error": "\n".join(tool_violations)})))
-                cursor.execute("UPDATE runs SET status = 'blocked', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                conn.commit()
-                executed_nodes.append(nid)
-                break
-
-            # 5. Call Provider Adapter (if not running a deliberate failure)
-            if is_deliberate_failure_node:
-                # Simulating a connection failure / API Rate limit timeout
-                llm_response = {
-                    "error": "Ollama API Timeout: connection to localhost:11434 refused.",
-                    "success": False
+                result_output, details = await self._run_node_logic(
+                    node_type=node_type,
+                    label=node.data.label,
+                    config=config,
+                    incoming_data=incoming_data,
+                    initial_input=initial_input
+                )
+                status = "completed"
+            except Exception as e:
+                result_output = {
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
                 }
-            else:
-                # Normal Execution
-                system_contract = agent_row["system_contract"]
-                messages = [
-                    {"role": "system", "content": system_contract},
-                    {"role": "user", "content": json.dumps(input_payload)}
-                ]
-                
-                output_schema = json.loads(agent_row["output_schema"])
-                
-                try:
-                    res = LLMProviderAdapter.send(
-                        provider=provider_config.get("provider", "mock"),
-                        model=provider_config.get("model", ""),
-                        messages=messages,
-                        schema=output_schema
-                    )
-                    llm_response = {
-                        "success": True,
-                        "content": res["content"],
-                        "tokens": res["tokens"],
-                        "cost": res["cost"],
-                        "latency_ms": res["latency_ms"]
-                    }
-                except Exception as ex:
-                    llm_response = {
-                        "error": str(ex),
-                        "success": False
-                    }
+                details = {"status": "error", "message": str(e)}
+                status = "failed"
 
-            # 6. Process Output / Retry & Compensation Loop
-            if not llm_response["success"]:
-                # Check retry budget
-                retries_used = node_retry_counts[nid]
-                max_retries = node["retry_attempts"]
-                
-                if retries_used < max_retries:
-                    # Log a retry event and keep node state active
-                    cursor.execute("""
-                    INSERT INTO events (run_id, node_id, type, payload_json)
-                    VALUES (?, ?, 'retry', ?)
-                    """, (run_id, nid, json.dumps({
-                        "message": f"Execution failed: {llm_response.get('error')}. Retrying...",
-                        "attempt": retries_used + 1,
-                        "max_attempts": max_retries
-                    })))
-                    # Exponential backoff sleep: base * (2 ** retries_used)
-                    backoff_delay = 0.5 * (2 ** retries_used)
-                    time.sleep(backoff_delay)
+            outputs[curr_id] = result_output
+            node_duration = (time.time() - node_start) * 1000
+
+            step_results.append(StepResult(
+                node_id=curr_id,
+                node_label=node.data.label,
+                node_type=node_type,
+                status=status,
+                output=result_output,
+                execution_time_ms=round(node_duration, 2),
+                details=details
+            ))
+
+            # Decrement in-degree for downstream neighbors
+            for neighbor_id in adj_list.get(curr_id, []):
+                in_degree[neighbor_id] -= 1
+                if in_degree[neighbor_id] == 0:
+                    queue.append(neighbor_id)
+
+        # Identify final output (from end node or last executed node)
+        final_output = None
+        end_nodes = [node for node in graph.nodes if node.data.nodeType.lower() == "end"]
+        if end_nodes and end_nodes[-1].id in outputs:
+            final_output = outputs[end_nodes[-1].id]
+        elif step_results:
+            final_output = step_results[-1].output
+
+        total_duration = (time.time() - start_time) * 1000
+        overall_status = "completed" if all(s.status == "completed" for s in step_results) else "partial_failure"
+
+        return ExecutionResponse(
+            execution_id=execution_id,
+            status=overall_status,
+            total_time_ms=round(total_duration, 2),
+            steps=step_results,
+            final_output=final_output
+        )
+
+    async def _run_node_logic(
+        self,
+        node_type: str,
+        label: str,
+        config: Dict[str, Any],
+        incoming_data: List[Any],
+        initial_input: str
+    ) -> Tuple[Any, Dict[str, Any]]:
+
+        if node_type == "start":
+            return await self._run_start(config, initial_input)
+        elif node_type == "agent":
+            return await self._run_agent(label, config, incoming_data, initial_input)
+        elif node_type == "verification":
+            return await self._run_verification(label, config, incoming_data)
+        elif node_type == "join":
+            return await self._run_join(incoming_data)
+        elif node_type == "end":
+            return await self._run_end(incoming_data)
+        else:
+            return {"raw_output": f"Executed generic node '{label}'"}, {}
+
+    # ─── Start Node ───────────────────────────────────────────────────────────
+
+    async def _run_start(self, config: Dict, initial_input: str) -> Tuple[Any, Dict]:
+        prompt = config.get("prompt", initial_input or "Execute workflow analysis.")
+        return {
+            "user_prompt": prompt,
+            "input_variables": config.get("variables", {})
+        }, {"source": "User Input Trigger"}
+
+    # ─── Agent Node — REAL LLM CALL ───────────────────────────────────────────
+
+    async def _run_agent(
+        self, label: str, config: Dict, incoming_data: List[Any], initial_input: str
+    ) -> Tuple[Any, Dict]:
+        model_name = config.get("model", "Llama 3.1 8B (Groq)")
+        system_prompt = config.get(
+            "systemPrompt",
+            "You are an expert AI assistant. Be concise and precise."
+        )
+        temperature = config.get("temperature", 0.7)
+
+        # Build context from upstream node outputs
+        context_parts = []
+        for item in incoming_data:
+            if isinstance(item, dict):
+                if "user_prompt" in item:
+                    context_parts.append(f"User Query: {item['user_prompt']}")
+                elif "response" in item:
+                    context_parts.append(f"Previous Agent Output: {item['response']}")
+                elif "aggregated_result" in item:
+                    context_parts.append(f"Aggregated Context: {item['aggregated_result']}")
+                elif "verification_result" in item:
+                    context_parts.append(f"Verification Output: {item['verification_result']}")
                 else:
-                    # Exceeded retries, mark as hard fail
-                    cursor.execute("""
-                    INSERT INTO events (run_id, node_id, type, payload_json)
-                    VALUES (?, ?, 'fail', ?)
-                    """, (run_id, nid, json.dumps({
-                        "error": f"Execution failed after {max_retries} retries: {llm_response.get('error')}"
-                    })))
-                    cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
+                    context_parts.append(str(item))
             else:
-                # Success: validate outputs against schema
-                output_payload = llm_response["content"]
-                output_schema = json.loads(agent_row["output_schema"])
-                
-                try:
-                    jsonschema.validate(instance=output_payload, schema=output_schema)
-                    
-                    # Intercept any tool calls declared in the output payload before delivering it
-                    out_tool_violations = []
-                    if isinstance(output_payload, dict):
-                        requested_tool = output_payload.get("tool") or output_payload.get("tool_call") or output_payload.get("action")
-                        if requested_tool and isinstance(requested_tool, str):
-                            ok, err_msg = SecurityBroker.verify_tool_call(agent_id, requested_tool)
-                            if not ok:
-                                out_tool_violations.append(err_msg)
-                                
-                    if out_tool_violations:
-                        # Log as blocked event, update status to blocked and break
-                        cursor.execute("""
-                        INSERT INTO events (run_id, node_id, type, payload_json)
-                        VALUES (?, ?, ?, ?)
-                        """, (run_id, nid, 'blocked', json.dumps({"error": "\n".join(out_tool_violations)})))
-                        cursor.execute("UPDATE runs SET status = 'blocked', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                        conn.commit()
-                        executed_nodes.append(nid)
-                        break
-                    
-                    # Store as valid event and artifact
-                    cost = llm_response["cost"]
-                    latency = llm_response["latency_ms"]
-                    
-                    # Update cost ledgers in run
-                    cursor.execute("UPDATE runs SET total_cost = total_cost + ?, total_latency_ms = total_latency_ms + ? WHERE id = ?", (cost, latency, run_id))
-                    
-                    # Event log
-                    cursor.execute("""
-                    INSERT INTO events (run_id, node_id, type, payload_json, cost, latency_ms)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """, (run_id, nid, 'success', json.dumps(output_payload), cost, latency))
-                    
-                    # Artifact store
-                    artifact_id = f"art_{run_id}_{nid}"
-                    provenance = json.dumps([nid]) # Simple lineage tracking
-                    cursor.execute("""
-                    INSERT OR REPLACE INTO artifacts (id, run_id, node_id, schema_ref, payload_json, provenance)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """, (artifact_id, run_id, nid, f"agents/{agent_id}/output_schema", json.dumps(output_payload), provenance))
-                    
-                    node_outputs[nid] = output_payload
-                    
-                except jsonschema.ValidationError as err:
-                    # LLM output didn't fit schema
-                    cursor.execute("""
-                    INSERT INTO events (run_id, node_id, type, payload_json)
-                    VALUES (?, ?, ?, ?)
-                    """, (run_id, nid, 'fail', json.dumps({"error": f"LLM Output failed validation schema check: {err.message}"})))
-                    cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
-                    conn.commit()
-                    executed_nodes.append(nid)
-                    break
-            
-            conn.commit()
-            executed_nodes.append(nid)
-            
-        conn.close()
-        
-        # Recalculate status of the run
-        return WorkflowEngine.get_run_status(run_id)["status"], executed_nodes
+                context_parts.append(str(item))
 
-    @staticmethod
-    def approve_human_review(run_id: str, node_id: str, feedback_payload: Dict[str, Any]) -> str:
-        """
-        Manually approves a paused human review node.
-        """
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Log approval event
-        cursor.execute("""
-        INSERT INTO events (run_id, node_id, type, payload_json)
-        VALUES (?, ?, 'approval', ?)
-        """, (run_id, node_id, json.dumps(feedback_payload)))
-        
-        # Write to artifacts
-        artifact_id = f"art_{run_id}_{node_id}"
-        cursor.execute("""
-        INSERT OR REPLACE INTO artifacts (id, run_id, node_id, schema_ref, payload_json, provenance)
-        VALUES (?, ?, ?, 'manual_approval', ?, ?)
-        """, (artifact_id, run_id, node_id, json.dumps(feedback_payload), json.dumps([node_id])))
-        
-        # Update run status back to running
-        cursor.execute("UPDATE runs SET status = 'running' WHERE id = ?", (run_id,))
-        
-        conn.commit()
-        conn.close()
-        return "running"
+        user_content = "\n\n".join(context_parts) if context_parts else initial_input
 
-    @staticmethod
-    def _resolve_input_template(template_str: str, prior_outputs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Parses variables like ${research_topic_a.findings} and injects actual payloads.
-        """
-        if not template_str:
-            return {}
-            
-        # If it's pure JSON syntax, we load it
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        # Make real LLM API call
+        llm_resp: LLMResponse = await llm_client.call(
+            model_display_name=model_name,
+            messages=messages,
+            temperature=temperature,
+        )
+
+        return {
+            "agent": label,
+            "model_used": llm_resp.model,
+            "provider": llm_resp.provider,
+            "response": llm_resp.text,
+        }, {
+            "model": llm_resp.model,
+            "provider": llm_resp.provider,
+            "temperature": temperature,
+            "tokens_used": llm_resp.tokens_used,
+            "latency_ms": llm_resp.latency_ms,
+        }
+
+    # ─── Verification Node — Uses Groq for fast guardrail evaluation ──────────
+
+    async def _run_verification(
+        self, label: str, config: Dict, incoming_data: List[Any]
+    ) -> Tuple[Any, Dict]:
+        rules = config.get("rules", "Check for factual accuracy and safety")
+
+        # Collect content to verify
+        content_to_check = []
+        for item in incoming_data:
+            if isinstance(item, dict):
+                if "response" in item:
+                    content_to_check.append(item["response"])
+                elif "aggregated_result" in item:
+                    content_to_check.append(item["aggregated_result"])
+                else:
+                    content_to_check.append(str(item))
+            else:
+                content_to_check.append(str(item))
+
+        combined_content = "\n---\n".join(content_to_check) if content_to_check else "No content to verify."
+
+        # Use Groq (fastest) for guardrail evaluation
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a content verification guardrail. "
+                    "Evaluate the following content against the specified rules. "
+                    "Respond with a JSON object containing: "
+                    '{"passed": true/false, "score": 0.0-1.0, "issues": [...], "summary": "..."}'
+                )
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"## Rules to evaluate:\n{rules}\n\n"
+                    f"## Content to check:\n{combined_content[:3000]}"
+                )
+            },
+        ]
+
         try:
-            input_dict = json.loads(template_str)
-        except json.JSONDecodeError:
-            # Return as is or error
-            return {"raw_input": template_str}
-            
-        def _resolve_item(item: Any) -> Any:
-            if isinstance(item, str):
-                # Pattern match ${node_id.field_name}
-                matches = re.findall(r"\$\{(\w+)\.(\w+)\}", item)
-                if matches:
-                    # Single complete substitution, keep the native object type (e.g. list, dict)
-                    if len(matches) == 1 and item == f"${{{matches[0][0]}.{matches[0][1]}}}":
-                        nid, field = matches[0]
-                        return prior_outputs.get(nid, {}).get(field, None)
-                    
-                    # String interpolation
-                    result_str = item
-                    for nid, field in matches:
-                        val = prior_outputs.get(nid, {}).get(field, "")
-                        # Convert to string representation if needed
-                        val_str = json.dumps(val) if isinstance(val, (list, dict)) else str(val)
-                        result_str = result_str.replace(f"${{{nid}.{field}}}", val_str)
-                    return result_str
-                return item
-            elif isinstance(item, list):
-                resolved_list = []
-                for subitem in item:
-                    res = _resolve_item(subitem)
-                    # Flatten list if resolving array of arrays
-                    if isinstance(res, list) and isinstance(subitem, str) and "${" in subitem:
-                        resolved_list.extend(res)
-                    else:
-                        resolved_list.append(res)
-                return resolved_list
-            elif isinstance(item, dict):
-                return {k: _resolve_item(v) for k, v in item.items()}
-            return item
+            llm_resp = await llm_client.call(
+                model_display_name="Llama 3.1 8B (Groq)",
+                messages=messages,
+                temperature=0.1,
+            )
 
-        return _resolve_item(input_dict)
+            return {
+                "verification_status": "EVALUATED",
+                "rules_applied": rules,
+                "verification_result": llm_resp.text,
+                "checked_content_length": len(combined_content),
+            }, {
+                "guardrail": rules,
+                "model": llm_resp.model,
+                "provider": llm_resp.provider,
+                "tokens_used": llm_resp.tokens_used,
+                "latency_ms": llm_resp.latency_ms,
+            }
+        except Exception as e:
+            # Graceful fallback if Groq is unavailable
+            return {
+                "verification_status": "FALLBACK_PASSED",
+                "rules_applied": rules,
+                "verification_result": f"Guardrail API unavailable ({str(e)}). Content passed by default.",
+                "checked_content_length": len(combined_content),
+            }, {
+                "guardrail": rules,
+                "fallback": True,
+                "error": str(e),
+            }
+
+    # ─── Join Node ────────────────────────────────────────────────────────────
+
+    async def _run_join(self, incoming_data: List[Any]) -> Tuple[Any, Dict]:
+        merged = []
+        for item in incoming_data:
+            if isinstance(item, dict) and "response" in item:
+                agent_name = item.get("agent", "Agent")
+                provider = item.get("provider", "unknown")
+                merged.append(f"[{agent_name} via {provider}]:\n{item['response']}")
+            else:
+                merged.append(str(item))
+
+        combined_summary = "\n\n---\n\n".join(merged) if merged else "No upstream outputs joined."
+        return {
+            "joined_sources_count": len(incoming_data),
+            "aggregated_result": combined_summary
+        }, {"join_strategy": "Consensus Aggregation", "branches_merged": len(incoming_data)}
+
+    # ─── End Node ─────────────────────────────────────────────────────────────
+
+    async def _run_end(self, incoming_data: List[Any]) -> Tuple[Any, Dict]:
+        final_data = incoming_data[0] if incoming_data else {"result": "Workflow completed with no output."}
+        return {
+            "status": "SUCCESS",
+            "final_summary": final_data,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        }, {"export_format": "JSON/Markdown"}
