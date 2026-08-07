@@ -93,6 +93,88 @@ function MaestroShell() {
     setIsSimulationMode(true);
     setExecCollapsed(false);
     setWorkflowOpen(true); // Open the canvas so the user can see the graph nodes!
+
+    // Dynamic Mock Generators
+    const generateMockFindings = (prompt: string, index: number) => {
+      const cleanPrompt = prompt.trim();
+      const isSecurity = cleanPrompt.toLowerCase().includes('adversarial') || 
+                         cleanPrompt.toLowerCase().includes('security') || 
+                         cleanPrompt.toLowerCase().includes('hack');
+                         
+      if (isSecurity) {
+        return index === 1 
+          ? [
+              "Vulnerability scan completed on target application endpoints.",
+              "Identified potential SQL Injection (SQLi) hazard inside authentication routers.",
+              "Sensitive environment variables found exposed without secure vault storage."
+            ]
+          : [
+              "Dependency inspector flagged 3 critical-risk vulnerable node_modules packages.",
+              "Wildcard CORS origin rules found configured in API response headers.",
+              "Unprotected administrators console path identified on server root."
+            ];
+      }
+
+      if (cleanPrompt.toLowerCase().includes('speech') || cleanPrompt.toLowerCase().includes('text') || cleanPrompt.toLowerCase().includes('helper')) {
+        return index === 1 
+          ? [
+              "Streaming Audio Layer: WebRTC connection established with 100ms chunking intervals.",
+              "Speech-to-Text Pipeline: Dual-route processing using Whisper API (primary) and Gemini Live (fallback).",
+              "Latency Constraints: Average latency verified at 240ms under heavy socket loads."
+            ]
+          : [
+              "Semantic Validation: Text chunk embeddings compared against compliance guidelines.",
+              "Security Encryption: Audio streams encrypted in transit via WebSockets Secure (WSS).",
+              "Database Handoff: Transcripts logged directly to SQLite database for audit trails."
+            ];
+      }
+      
+      const keywords = cleanPrompt.split(/\s+/).filter(w => w.length > 4 && !['about', 'write', 'draft', 'create', 'verify', 'check', 'report'].includes(w.toLowerCase())).slice(0, 3);
+      const topic = keywords.join(' ') || 'requested project task';
+      
+      if (index === 1) {
+        return [
+          `Primary research gathered comprehensive data points relating to ${topic}.`,
+          `High growth prospects and strong initial market demand indicators verified.`,
+          `Competitive analysis maps out key active implementation barriers regarding ${topic}.`
+        ];
+      } else {
+        return [
+          `Secondary literature review evaluates resource constraints for ${topic}.`,
+          `Initial cost modeling projects solid efficiency improvements and cost reductions.`,
+          `Industry early-adopters display positive strategic alignment toward implementing ${topic}.`
+        ];
+      }
+    };
+
+    const generateMockDraft = (prompt: string) => {
+      const cleanPrompt = prompt.trim();
+      const isSecurity = cleanPrompt.toLowerCase().includes('adversarial') || 
+                         cleanPrompt.toLowerCase().includes('security') || 
+                         cleanPrompt.toLowerCase().includes('hack');
+                         
+      if (isSecurity) {
+        return `# Security Audit Report\n\n## Vulnerability Findings\n- SQL Injection risk on user registration endpoint.\n- Insecure storage of client environment secrets.\n\n## Recommendations\nImmediately implement parameterized queries and migrate secrets to a secure Vault.`;
+      }
+
+      if (cleanPrompt.toLowerCase().includes('speech') || cleanPrompt.toLowerCase().includes('text') || cleanPrompt.toLowerCase().includes('helper')) {
+        return `# System Architecture & Roadmap: Speech-to-Text Helper\n\n` +
+               `## 1. System Architecture\n` +
+               `- **Ingress**: User Microphone → Web Audio API Browser Stream → WebSockets Secure (WSS).\n` +
+               `- **Processing**: WebSocket Server Node.js → Fast Chunking → Whisper API / Deepgram Core.\n` +
+               `- **Guardrail**: Sentiment Analysis + PII Masking Filter.\n` +
+               `- **Egress**: Live Text Broadcast to Support Console iframe Widget.\n\n` +
+               `## 2. Functional Implementation Roadmap\n` +
+               `- **Milestone 1 (Weeks 1-2)**: Real-time WebRTC audio recording and chunk streaming setup.\n` +
+               `- **Milestone 2 (Weeks 3-4)**: Transcript compilation, PII masking, and latency optimizations.\n` +
+               `- **Milestone 3 (Weeks 5-6)**: Support portal widget embedding, unit testing, and production deployment.`;
+      }
+      
+      const keywords = cleanPrompt.split(/\s+/).filter(w => w.length > 4 && !['about', 'write', 'draft', 'create', 'verify', 'check', 'report'].includes(w.toLowerCase())).slice(0, 3);
+      const topic = keywords.join(' ') || 'requested project task';
+      
+      return `# Strategy & Implementation Report: ${topic.toUpperCase()}\n\n## Executive Summary\n- Solid technical foundation built on top of user requirements.\n- High strategic relevance in the current market landscape.\n\n## Strategic Roadmap\nWe recommend dedicating the next phase to refining the core features and scaling the architecture for ${topic}.`;
+    };
     
     const isAdversarial = goalText.toLowerCase().includes('adversarial') || 
                          goalText.toLowerCase().includes('security') || 
@@ -191,11 +273,7 @@ function MaestroShell() {
             node_id: 'research_topic_a',
             schema_ref: 'agents/research_agent/output_schema',
             payload_json: {
-              findings: [
-                "Lithium-ion batteries store electrical energy chemically using lithium ions.",
-                "They feature high energy density, long cycle life, and low self-discharge rates.",
-                "Key engineering challenges include thermal runaway risk and resource extraction impacts."
-              ]
+              findings: generateMockFindings(goalText, 1)
             }
           }
         ];
@@ -216,11 +294,7 @@ function MaestroShell() {
             node_id: 'research_topic_b',
             schema_ref: 'agents/research_agent/output_schema',
             payload_json: {
-              findings: [
-                "Hydrogen vehicles store compressed hydrogen gas (700 bar) onboard.",
-                "Energy is generated via a chemical reaction in the fuel cell stack.",
-                "Challenges involve low refueling infrastructure density and hydrogen transport loss."
-              ]
+              findings: generateMockFindings(goalText, 2)
             }
           }
         ];
@@ -247,7 +321,7 @@ function MaestroShell() {
             node_id: 'write_draft',
             schema_ref: 'agents/writer_agent/output_schema',
             payload_json: {
-              draft: "# Comparative Report: Lithium-Ion vs Hydrogen Fuel Cells\n\n## Core Findings\n- Lithium-ion batteries store energy chemically with high efficiency.\n- Hydrogen vehicles utilize onboard fuel-cell stacks to convert hydrogen to electricity.\n\n## Policy Recommendations\nInvest in battery charging corridors for urban passenger transport, while keeping hydrogen reserved for heavy transport and long-haul shipping."
+              draft: generateMockDraft(goalText)
             }
           }
         ];
