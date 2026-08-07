@@ -1,10 +1,84 @@
 import sqlite3
 import json
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+try:
+    import libsql
+    HAS_LIBSQL = True
+except ImportError:
+    HAS_LIBSQL = False
+
+class DictCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, *args, **kwargs):
+        self._cursor.execute(*args, **kwargs)
+        return self
+
+    def executemany(self, *args, **kwargs):
+        self._cursor.executemany(*args, **kwargs)
+        return self
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        desc = self._cursor.description
+        if desc is None:
+            return row
+        return dict(zip([d[0] for d in desc], row))
+
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        desc = self._cursor.description
+        if desc is None:
+            return rows
+        cols = [d[0] for d in desc]
+        return [dict(zip(cols, r)) for r in rows]
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+class LibSQLConnectionWrapper:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return DictCursor(self._conn.cursor())
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except AttributeError:
+            pass
+
+    def close(self):
+        self._conn.close()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orchestrator.db")
 
 def get_db_connection():
+    url = os.environ.get("TURSO_DB_URL")
+    token = os.environ.get("TURSO_DB_TOKEN")
+    
+    if HAS_LIBSQL and url and token:
+        try:
+            raw_conn = libsql.connect(url, auth_token=token)
+            return LibSQLConnectionWrapper(raw_conn)
+        except Exception as e:
+            print(f"Failed to connect to Turso: {e}. Falling back to SQLite.")
+            
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
