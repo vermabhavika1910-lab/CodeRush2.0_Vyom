@@ -1,9 +1,5 @@
-<<<<<<< HEAD
-const API_BASE = 'https://coderush2-0-vyom.onrender.com/api';
-=======
 // Uses VITE_API_URL env variable if set (for deployed build), otherwise falls back to local dev server
 const API_BASE = `${import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000'}/api`;
->>>>>>> 036677709ec68658b507c46588f7b5938d9b37a2
 
 export const api = {
   executeWorkflow: async (graph: any, inputText: string = '') => {
@@ -59,6 +55,28 @@ export const api = {
   getRunStatus: async (runId: string) => {
     const res = await fetch(`${API_BASE}/runs/${runId}`);
     if (!res.ok) throw new Error('Failed to fetch run status');
+    return res.json();
+  },
+
+  listRuns: async () => {
+    const res = await fetch(`${API_BASE}/runs`);
+    if (!res.ok) throw new Error('Failed to fetch runs list');
+    return res.json();
+  },
+
+  replayRun: async (runId: string) => {
+    const res = await fetch(`${API_BASE}/runs/${runId}/replay`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error('Failed to replay run');
+    return res.json();
+  },
+
+  runEvaluation: async () => {
+    const res = await fetch(`${API_BASE}/eval`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error('Failed to run evaluation');
     return res.json();
   },
 };

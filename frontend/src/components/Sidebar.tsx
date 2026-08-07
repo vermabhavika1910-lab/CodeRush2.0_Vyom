@@ -12,6 +12,7 @@ import {
   type LucideIcon,
   X,
   Sparkles,
+  Gauge,
 } from 'lucide-react';
 import { useToast } from '@/components/Toast';
 
@@ -39,6 +40,7 @@ const ACTION_ITEMS: SidebarItem[] = [
 const NAV_ITEMS: SidebarItem[] = [
   { id: 'projects', label: 'Projects', icon: Folder, kind: 'nav', badge: '4' },
   { id: 'history', label: 'History', icon: History, kind: 'nav' },
+  { id: 'eval', label: 'Evaluation', icon: Gauge, kind: 'nav' },
 ];
 
 interface SidebarProps {

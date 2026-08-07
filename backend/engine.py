@@ -27,53 +27,70 @@ class WorkflowEngine:
                 parent_map[edge.target].append(edge.source)
 
         queue = [node_id for node_id, count in in_degree.items() if count == 0]
-        nodes_by_id = {node.id: node for node in graph.nodes}
         
-        run_state = {
-            "run_id": run_id,
-            "status": "pending" if queue else "failed",
-            "graph": graph.dict(),
-            "nodes_by_id": {nid: node.dict() for nid, node in nodes_by_id.items()},
-            "in_degree": in_degree,
-            "adj_list": adj_list,
-            "parent_map": parent_map,
-            "queue": queue,
-            "outputs": {},
-            "step_results": [],
-            "start_time": time.time(),
-            "initial_input": initial_input,
-            "error": None if queue else "Invalid Graph: Cycle detected or no starting node found."
-        }
-        
-        from state_store import state_store
-        state_store.save_execution(run_id, run_state)
+        import db
+        db.create_run(run_id, graph.dict(), initial_input, queue, in_degree, parent_map, adj_list)
         return run_id
 
     async def execute_step(self, run_id: str) -> Dict[str, Any]:
-        from state_store import state_store
-        run_state = state_store.get_execution(run_id)
+        import db
+        import json
+        run_state = db.get_run(run_id)
         if not run_state:
             return {"status": "not_found", "error": "Run not found"}
 
         if run_state["status"] in ["completed", "failed", "blocked"]:
+            run_state["outputs"] = json.loads(run_state["outputs_json"])
+            
+            db_events = db.get_events(run_id)
+            step_results = []
+            for e in db_events:
+                payload = json.loads(e["payload_json"])
+                step_results.append({
+                    "node_id": e["node_id"],
+                    "node_label": payload.get("node_label", ""),
+                    "node_type": payload.get("node_type", ""),
+                    "status": e["type"],
+                    "output": payload.get("output", {}),
+                    "execution_time_ms": e["latency_ms"],
+                    "details": payload.get("details", {})
+                })
+            run_state["step_results"] = step_results
             return run_state
 
-        queue = run_state["queue"]
-        nodes_by_id = run_state["nodes_by_id"]
-        outputs = run_state["outputs"]
-        step_results = run_state["step_results"]
-        adj_list = run_state["adj_list"]
-        in_degree = run_state["in_degree"]
-        parent_map = run_state["parent_map"]
-        initial_input = run_state["initial_input"]
+        queue = json.loads(run_state["queue_json"])
+        outputs = json.loads(run_state["outputs_json"])
+        adj_list = json.loads(run_state["adj_list_json"])
+        in_degree = json.loads(run_state["in_degree_json"])
+        parent_map = json.loads(run_state["parent_map_json"])
+        initial_input = run_state["goal"]
+        graph_dict = json.loads(run_state["provider_config_json"])
+        nodes_by_id = {node["id"]: node for node in graph_dict["nodes"]}
+
+        db_events = db.get_events(run_id)
+        step_results = []
+        for e in db_events:
+            payload = json.loads(e["payload_json"])
+            step_results.append({
+                "node_id": e["node_id"],
+                "node_label": payload.get("node_label", ""),
+                "node_type": payload.get("node_type", ""),
+                "status": e["type"],
+                "output": payload.get("output", {}),
+                "execution_time_ms": e["latency_ms"],
+                "details": payload.get("details", {})
+            })
 
         if not queue:
             all_done = len(step_results) == len(nodes_by_id)
-            run_state["status"] = "completed" if all_done else "failed"
-            state_store.save_execution(run_id, run_state)
+            status = "completed" if all_done else "failed"
+            db.update_run_state(run_id, status, queue, in_degree, outputs, ended_at=str(time.time()))
+            run_state = db.get_run(run_id)
+            run_state["step_results"] = step_results
+            run_state["outputs"] = outputs
             return run_state
 
-        run_state["status"] = "running"
+        db.update_run_state(run_id, "running", queue, in_degree, outputs)
         curr_id = queue.pop(0)
 
         from models import WorkflowNode
@@ -85,7 +102,16 @@ class WorkflowEngine:
         config = node.data.config or {}
 
         parent_ids = parent_map.get(curr_id, [])
-        incoming_data = [outputs[p_id] for p_id in parent_ids if p_id in outputs]
+        
+        # Enforce private scratch memory (Step 4 of plan)
+        # Inspect parent node config. If memory_scope == 'scratch', do not pass context.
+        incoming_data = []
+        for p_id in parent_ids:
+            if p_id in outputs:
+                p_node = nodes_by_id[p_id]
+                p_config = p_node.get("data", {}).get("config", {})
+                if p_config.get("memory_scope") != "scratch":
+                    incoming_data.append(outputs[p_id])
 
         try:
             result_output, details = await self._run_node_logic(
@@ -107,24 +133,31 @@ class WorkflowEngine:
         outputs[curr_id] = result_output
         node_duration = (time.time() - node_start) * 1000
 
-        from models import StepResult
-        step_res = StepResult(
-            node_id=curr_id,
-            node_label=node.data.label,
-            node_type=node_type,
-            status=status,
-            output=result_output,
-            execution_time_ms=round(node_duration, 2),
-            details=details
-        )
-        step_results.append(step_res.dict())
+        step_payload = {
+            "node_label": node.data.label,
+            "node_type": node_type,
+            "output": result_output,
+            "details": details
+        }
+        cost = details.get("cost", 0.0)
+        db.save_event(run_id, curr_id, status, step_payload, cost=cost, latency_ms=round(node_duration, 2))
 
-        # Security check: Block unauthorized commands
+        # Check for adversarial behavior in tool calling to block it
         if "delete" in str(result_output).lower() or "rm -rf" in str(result_output).lower() or "adversarial" in initial_input.lower():
             if node_type == "agent":
-                run_state["status"] = "blocked"
-                run_state["error"] = "Security violation: Out-of-scope action blocked."
-                state_store.save_execution(run_id, run_state)
+                db.update_run_state(run_id, "blocked", queue, in_degree, outputs, ended_at=str(time.time()))
+                run_state = db.get_run(run_id)
+                step_results.append({
+                    "node_id": curr_id,
+                    "node_label": node.data.label,
+                    "node_type": node_type,
+                    "status": "blocked",
+                    "output": result_output,
+                    "execution_time_ms": round(node_duration, 2),
+                    "details": details
+                })
+                run_state["step_results"] = step_results
+                run_state["outputs"] = outputs
                 return run_state
 
         for neighbor_id in adj_list.get(curr_id, []):
@@ -132,10 +165,34 @@ class WorkflowEngine:
             if in_degree[neighbor_id] == 0:
                 queue.append(neighbor_id)
 
+        run_status = "running"
+        ended_at = None
         if not queue:
-            all_done = len(step_results) == len(nodes_by_id)
-            run_state["status"] = "completed" if all_done else "failed"
-            
+            all_done = len(step_results) + 1 == len(nodes_by_id)
+            run_status = "completed" if all_done else "failed"
+            ended_at = str(time.time())
+
+        updated_events = db.get_events(run_id)
+        total_cost = sum(e["cost"] for e in updated_events)
+        total_latency = sum(e["latency_ms"] for e in updated_events)
+
+        db.update_run_state(run_id, run_status, queue, in_degree, outputs, ended_at=ended_at, total_cost=total_cost, total_latency_ms=total_latency)
+
+        run_state = db.get_run(run_id)
+        
+        step_results.append({
+            "node_id": curr_id,
+            "node_label": node.data.label,
+            "node_type": node_type,
+            "status": status,
+            "output": result_output,
+            "execution_time_ms": round(node_duration, 2),
+            "details": details
+        })
+        run_state["step_results"] = step_results
+        run_state["outputs"] = outputs
+        
+        if run_status == "completed":
             final_output = None
             end_nodes = [nid for nid, nd in nodes_by_id.items() if nd["data"]["nodeType"].lower() == "end"]
             if end_nodes and end_nodes[-1] in outputs:
@@ -144,110 +201,37 @@ class WorkflowEngine:
                 final_output = step_results[-1]["output"]
             run_state["final_output"] = final_output
 
-        state_store.save_execution(run_id, run_state)
         return run_state
 
     async def execute_workflow(self, graph: WorkflowGraph, initial_input: str) -> ExecutionResponse:
-        start_time = time.time()
-        execution_id = f"exec_{uuid.uuid4().hex[:8]}"
-
-        # Map nodes by ID for fast lookup
-        nodes_by_id = {node.id: node for node in graph.nodes}
-
-        # Build adjacency graph and calculate in-degrees
-        in_degree: Dict[str, int] = {node.id: 0 for node in graph.nodes}
-        adj_list: Dict[str, List[str]] = {node.id: [] for node in graph.nodes}
-        parent_map: Dict[str, List[str]] = {node.id: [] for node in graph.nodes}
-
-        for edge in graph.edges:
-            if edge.source in adj_list and edge.target in in_degree:
-                adj_list[edge.source].append(edge.target)
-                in_degree[edge.target] += 1
-                parent_map[edge.target].append(edge.source)
-
-        # Topological sorting queues
-        queue = [node_id for node_id, count in in_degree.items() if count == 0]
-
-        outputs: Dict[str, Any] = {}
-        step_results: List[StepResult] = []
-
-        if not queue:
-            return ExecutionResponse(
-                execution_id=execution_id,
-                status="failed",
-                total_time_ms=(time.time() - start_time) * 1000,
-                steps=[],
-                error="Invalid Graph: Cycle detected or no starting node found."
-            )
-
-        while queue:
-            curr_id = queue.pop(0)
-            node = nodes_by_id.get(curr_id)
-            if not node:
-                continue
-
-            node_start = time.time()
-            node_type = node.data.nodeType.lower()
-            config = node.data.config or {}
-
-            # Gather parent outputs
-            parent_ids = parent_map.get(curr_id, [])
-            incoming_data = [outputs[p_id] for p_id in parent_ids if p_id in outputs]
-
-            # Execute node logic based on node_type
-            try:
-                result_output, details = await self._run_node_logic(
-                    node_type=node_type,
-                    label=node.data.label,
-                    config=config,
-                    incoming_data=incoming_data,
-                    initial_input=initial_input
-                )
-                status = "completed"
-            except Exception as e:
-                result_output = {
-                    "error": str(e),
-                    "traceback": traceback.format_exc(),
-                }
-                details = {"status": "error", "message": str(e)}
-                status = "failed"
-
-            outputs[curr_id] = result_output
-            node_duration = (time.time() - node_start) * 1000
-
-            step_results.append(StepResult(
-                node_id=curr_id,
-                node_label=node.data.label,
-                node_type=node_type,
-                status=status,
-                output=result_output,
-                execution_time_ms=round(node_duration, 2),
-                details=details
+        run_id = await self.create_run(graph, initial_input)
+        status = "pending"
+        run_state = {}
+        while status in ["pending", "running"]:
+            run_state = await self.execute_step(run_id)
+            status = run_state["status"]
+            if status in ["completed", "failed", "blocked"]:
+                break
+        
+        from models import StepResult
+        steps = []
+        for s in run_state.get("step_results", []):
+            steps.append(StepResult(
+                node_id=s["node_id"],
+                node_label=s["node_label"],
+                node_type=s["node_type"],
+                status=s["status"],
+                output=s["output"],
+                execution_time_ms=s["execution_time_ms"],
+                details=s["details"]
             ))
-
-            # Decrement in-degree for downstream neighbors
-            for neighbor_id in adj_list.get(curr_id, []):
-                in_degree[neighbor_id] -= 1
-                if in_degree[neighbor_id] == 0:
-                    queue.append(neighbor_id)
-
-        # Identify final output (from end node or last executed node)
-        final_output = None
-        end_nodes = [node for node in graph.nodes if node.data.nodeType.lower() == "end"]
-        if end_nodes and end_nodes[-1].id in outputs:
-            final_output = outputs[end_nodes[-1].id]
-        elif step_results:
-            final_output = step_results[-1].output
-
-        total_duration = (time.time() - start_time) * 1000
-        overall_status = "completed" if all(s.status == "completed" for s in step_results) else "partial_failure"
-
+            
         return ExecutionResponse(
-            execution_id=execution_id,
-            status=overall_status,
-            total_time_ms=round(total_duration, 2),
-            steps=step_results,
-            final_output=final_output
+            execution_id=run_id,
+            status=run_state.get("status", "failed"),
+            total_time_ms=run_state.get("total_latency_ms", 0.0) or 0.0,
+            steps=steps,
+            final_output=run_state.get("final_output", None)
         )
 
     async def _run_node_logic(

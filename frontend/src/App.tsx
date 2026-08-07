@@ -8,6 +8,7 @@ import { WorkflowBuilder } from '@/components/WorkflowBuilder';
 import { AgentInspector } from '@/components/AgentInspector';
 import { ExecutionPanel } from '@/components/ExecutionPanel';
 import { RunHistory } from '@/components/RunHistory';
+import { EvaluationHarness } from '@/components/EvaluationHarness';
 import { IntroAnimation } from '@/components/IntroAnimation';
 import { LoginPage } from '@/components/LoginPage';
 import { AGENTS, WORKFLOW_NODES } from '@/data/mock';
@@ -19,7 +20,7 @@ function MaestroShell() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [introDone, setIntroDone] = useState(false);
   const [selected, setSelected] = useState('researcher');
-  const [view, setView] = useState<'home' | 'history'>('home');
+  const [view, setView] = useState<'home' | 'history' | 'eval'>('home');
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [execCollapsed, setExecCollapsed] = useState(false);
@@ -64,6 +65,8 @@ function MaestroShell() {
     setSelected(id);
     if (id === 'history') {
       setView('history');
+    } else if (id === 'eval') {
+      setView('eval');
     } else if (id === 'projects' || id === 'library' || id === 'add-work') {
       setView('home');
       push({ title: id === 'projects' ? 'Projects' : id === 'library' ? 'Agent Library' : 'New Work', message: 'Mock view loaded', variant: 'info' });
@@ -528,6 +531,8 @@ function MaestroShell() {
 
         {view === 'history' ? (
           <RunHistory />
+        ) : view === 'eval' ? (
+          <EvaluationHarness />
         ) : workflowOpen ? (
           <div className="flex flex-1 min-w-0">
             <WorkflowBuilder
@@ -566,7 +571,7 @@ function MaestroShell() {
         )}
       </div>
 
-      {view !== 'history' && (
+      {view !== 'history' && view !== 'eval' && (
         <>
           {!execCollapsed && <div className="resize-handle-y" onPointerDown={execHeight.onPointerDown} />}
           <ExecutionPanel
