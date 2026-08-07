@@ -95,7 +95,7 @@ class WorkflowEngine:
         
         cursor.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
         run_row = cursor.fetchone()
-        if not run_row or run_row["status"] in ["success", "failed", "blocked"]:
+        if not run_row or run_row["status"] in ["success", "blocked"]:
             conn.close()
             return run_row["status"] if run_row else "not_found", []
             
@@ -125,7 +125,10 @@ class WorkflowEngine:
             payload = json.loads(r["payload_json"])
             
             if ntype == "start":
-                node_states[nid] = "running"
+                if payload.get("status") == "waiting_for_approval":
+                    node_states[nid] = "paused_review"
+                else:
+                    node_states[nid] = "running"
             elif ntype == "success":
                 node_states[nid] = "success"
                 node_outputs[nid] = payload
