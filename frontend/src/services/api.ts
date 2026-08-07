@@ -1,4 +1,9 @@
+<<<<<<< HEAD
 const API_BASE = 'https://coderush2-0-vyom.onrender.com/api';
+=======
+// Uses VITE_API_URL env variable if set (for deployed build), otherwise falls back to local dev server
+const API_BASE = `${import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000'}/api`;
+>>>>>>> 036677709ec68658b507c46588f7b5938d9b37a2
 
 export const api = {
   executeWorkflow: async (graph: any, inputText: string = '') => {
