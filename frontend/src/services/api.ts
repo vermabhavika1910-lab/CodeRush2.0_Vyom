@@ -1,4 +1,5 @@
-const API_BASE = 'http://127.0.0.1:8000/api';
+// Uses VITE_API_URL env variable if set (for deployed build), otherwise falls back to local dev server
+const API_BASE = `${import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000'}/api`;
 
 export const api = {
   executeWorkflow: async (graph: any, inputText: string = '') => {
