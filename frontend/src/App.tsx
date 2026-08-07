@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { ThemeProvider } from '@/theme/ThemeProvider';
 import { ToastProvider, useToast } from '@/components/Toast';
 import { TopBar } from '@/components/TopBar';
@@ -28,6 +28,20 @@ function MaestroShell() {
   const [simulatedSteps, setSimulatedSteps] = useState<any[] | undefined>(undefined);
   const [simulatedArtifacts, setSimulatedArtifacts] = useState<any[] | undefined>(undefined);
   const [nodeStates, setNodeStates] = useState<Record<string, string>>({});
+  const [isRunning, setIsRunning] = useState(false);
+  const [currentPrompt, setCurrentPrompt] = useState('');
+  const cancelRef = useRef(false);
+
+  const handleStopOrchestration = () => {
+    cancelRef.current = true;
+    setIsRunning(false);
+    setWorkflowOpen(false); // Return UI to pre-run state (HomePage)
+    // Note: Clear simulated states too
+    setSimulatedSteps(undefined);
+    setSimulatedArtifacts(undefined);
+    setNodeStates({});
+  };
+
 
   const isTablet = useMediaQuery('(max-width: 1024px)');
   const isMobile = useMediaQuery('(max-width: 640px)');
@@ -35,9 +49,9 @@ function MaestroShell() {
   const [sidebarDrawerOpen, setSidebarDrawerOpen] = useState(false);
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
 
-  const sidebar = useResizable(260, 220, 380, 'x');
-  const inspector = useResizable(360, 300, 480, 'x');
-  const execHeight = useResizable(280, 120, 500, 'y');
+  const sidebar = useResizable(260, 220, 380, 'x', false);
+  const inspector = useResizable(360, 300, 480, 'x', true);
+  const execHeight = useResizable(280, 120, 500, 'y', true);
 
   const selectedAgent = (() => {
     if (!selectedNodeId) return null;
@@ -73,6 +87,9 @@ function MaestroShell() {
   };
 
   const runLocalSimulation = async (goalText: string) => {
+    cancelRef.current = false;
+    setIsRunning(true);
+    setCurrentPrompt(goalText);
     setIsSimulationMode(true);
     setExecCollapsed(false);
     setWorkflowOpen(true); // Open the canvas so the user can see the graph nodes!
@@ -92,178 +109,195 @@ function MaestroShell() {
     ];
 
     const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const delay = async (ms: number) => {
+      await sleep(ms);
+      if (cancelRef.current) throw new Error('cancelled');
+    };
     
-    // Step 1: Initialize all to pending
-    let simSteps = nodes.map(n => ({
-      nodeId: n.id,
-      agent: n.agent,
-      status: 'pending',
-      latency: 0,
-      tokens: 0,
-      cost: 0,
-      retries: 0
-    }));
-    
-    const initialStates: Record<string, string> = {};
-    nodes.forEach(n => { initialStates[n.id] = 'pending'; });
-    setNodeStates(initialStates);
-    setSimulatedSteps(simSteps);
-    setSimulatedArtifacts([]);
-    await sleep(1000);
-    
-    if (isAdversarial) {
-      // 1. Run trigger node
-      simSteps = simSteps.map(s => s.nodeId === 'trigger_node' ? { ...s, status: 'running' } : s);
-      setSimulatedSteps([...simSteps]);
-      setNodeStates({ ...initialStates, trigger_node: 'running' });
-      await sleep(1500);
+    try {
+      // Step 1: Initialize all to pending
+      let simSteps = nodes.map(n => ({
+        nodeId: n.id,
+        agent: n.agent,
+        status: 'pending',
+        latency: 0,
+        tokens: 0,
+        cost: 0,
+        retries: 0
+      }));
       
-      // 2. Block/Fail trigger node
-      simSteps = simSteps.map(s => s.nodeId === 'trigger_node' ? { ...s, status: 'failure', cost: 0.001, latency: 1200, tokens: 600 } : s);
-      setSimulatedSteps([...simSteps]);
-      setNodeStates({ ...initialStates, trigger_node: 'failure' });
+      const initialStates: Record<string, string> = {};
+      nodes.forEach(n => { initialStates[n.id] = 'pending'; });
+      setNodeStates(initialStates);
+      setSimulatedSteps(simSteps);
+      setSimulatedArtifacts([]);
+      await delay(1000);
       
-      const blockedArt = [
-        {
-          id: 'art_blocked_1',
-          node_id: 'trigger_node',
-          schema_ref: 'security/blocked_event',
-          payload_json: {
-            error: "SECURITY BREACH BLOCKED: Agent attempted to invoke un-whitelisted tool 'delete_system_logs'. Blocked event logged to 'events' table."
+      if (isAdversarial) {
+        // 1. Run trigger node
+        simSteps = simSteps.map(s => s.nodeId === 'trigger_node' ? { ...s, status: 'running' } : s);
+        setSimulatedSteps([...simSteps]);
+        setNodeStates({ ...initialStates, trigger_node: 'running' });
+        await delay(1500);
+        
+        // 2. Block/Fail trigger node
+        simSteps = simSteps.map(s => s.nodeId === 'trigger_node' ? { ...s, status: 'failure', cost: 0.001, latency: 1200, tokens: 600 } : s);
+        setSimulatedSteps([...simSteps]);
+        setNodeStates({ ...initialStates, trigger_node: 'failure' });
+        
+        const blockedArt = [
+          {
+            id: 'art_blocked_1',
+            node_id: 'trigger_node',
+            schema_ref: 'security/blocked_event',
+            payload_json: {
+              error: "SECURITY BREACH BLOCKED: Agent attempted to invoke un-whitelisted tool 'delete_system_logs'. Blocked event logged to 'events' table."
+            }
           }
-        }
-      ];
-      setSimulatedArtifacts(blockedArt);
-      push({ title: 'Adversarial Blocked', message: "Agent attempted un-whitelisted tool 'delete_system_logs'. Blocked event logged to SQLite.", variant: 'error' });
-      await sleep(1000);
-      
-      // 3. Mark run blocked/failed
-      push({ title: 'Run halted', message: 'Status: BLOCKED', variant: 'error' });
-      setExecCollapsed(false);
-      execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
-    } else {
-      const activeStates = { ...initialStates };
-      
-      // 1. Run research A & B in parallel
-      simSteps = simSteps.map(s => ['research_topic_a', 'research_topic_b'].includes(s.nodeId) ? { ...s, status: 'running' } : s);
-      setSimulatedSteps([...simSteps]);
-      activeStates['research_topic_a'] = 'running';
-      activeStates['research_topic_b'] = 'running';
-      setNodeStates({ ...activeStates });
-      await sleep(1800);
-      
-      // 2. A succeeds, B fails and triggers retry backoff
-      simSteps = simSteps.map(s => {
-        if (s.nodeId === 'research_topic_a') return { ...s, status: 'success', cost: 0.001, latency: 1500, tokens: 900 };
-        if (s.nodeId === 'research_topic_b') return { ...s, status: 'retry' };
-        return s;
-      });
-      setSimulatedSteps([...simSteps]);
-      activeStates['research_topic_a'] = 'success';
-      activeStates['research_topic_b'] = 'retry';
-      setNodeStates({ ...activeStates });
-      
-      const findingsArtA = [
-        {
-          id: 'art_a',
-          node_id: 'research_topic_a',
-          schema_ref: 'agents/research_agent/output_schema',
-          payload_json: {
-            findings: [
-              "Lithium-ion batteries store electrical energy chemically using lithium ions.",
-              "They feature high energy density, long cycle life, and low self-discharge rates.",
-              "Key engineering challenges include thermal runaway risk and resource extraction impacts."
-            ]
+        ];
+        setSimulatedArtifacts(blockedArt);
+        push({ title: 'Adversarial Blocked', message: "Agent attempted un-whitelisted tool 'delete_system_logs'. Blocked event logged to SQLite.", variant: 'error' });
+        await delay(1000);
+        
+        // 3. Mark run blocked/failed
+        push({ title: 'Run halted', message: 'Status: BLOCKED', variant: 'error' });
+        setExecCollapsed(false);
+        execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
+      } else {
+        const activeStates = { ...initialStates };
+        
+        // 1. Run research A & B in parallel
+        simSteps = simSteps.map(s => ['research_topic_a', 'research_topic_b'].includes(s.nodeId) ? { ...s, status: 'running' } : s);
+        setSimulatedSteps([...simSteps]);
+        activeStates['research_topic_a'] = 'running';
+        activeStates['research_topic_b'] = 'running';
+        setNodeStates({ ...activeStates });
+        await delay(1800);
+        
+        // 2. A succeeds, B fails and triggers retry backoff
+        simSteps = simSteps.map(s => {
+          if (s.nodeId === 'research_topic_a') return { ...s, status: 'success', cost: 0.001, latency: 1500, tokens: 900 };
+          if (s.nodeId === 'research_topic_b') return { ...s, status: 'retry' };
+          return s;
+        });
+        setSimulatedSteps([...simSteps]);
+        activeStates['research_topic_a'] = 'success';
+        activeStates['research_topic_b'] = 'retry';
+        setNodeStates({ ...activeStates });
+        
+        const findingsArtA = [
+          {
+            id: 'art_a',
+            node_id: 'research_topic_a',
+            schema_ref: 'agents/research_agent/output_schema',
+            payload_json: {
+              findings: [
+                "Lithium-ion batteries store electrical energy chemically using lithium ions.",
+                "They feature high energy density, long cycle life, and low self-discharge rates.",
+                "Key engineering challenges include thermal runaway risk and resource extraction impacts."
+              ]
+            }
           }
-        }
-      ];
-      setSimulatedArtifacts(findingsArtA);
-      push({ title: 'Handoff Failure on Topic B', message: 'API connection timed out. Retrying with exponential backoff...', variant: 'info' });
-      await sleep(2000);
-      
-      // 3. B succeeds on retry
-      simSteps = simSteps.map(s => s.nodeId === 'research_topic_b' ? { ...s, status: 'success', cost: 0.001, latency: 1200, tokens: 750, retries: 1 } : s);
-      setSimulatedSteps([...simSteps]);
-      activeStates['research_topic_b'] = 'success';
-      setNodeStates({ ...activeStates });
-      
-      const findingsArtB = [
-        ...findingsArtA,
-        {
-          id: 'art_b',
-          node_id: 'research_topic_b',
-          schema_ref: 'agents/research_agent/output_schema',
-          payload_json: {
-            findings: [
-              "Hydrogen vehicles store compressed hydrogen gas (700 bar) onboard.",
-              "Energy is generated via a chemical reaction in the fuel cell stack.",
-              "Challenges involve low refueling infrastructure density and hydrogen transport loss."
-            ]
+        ];
+        setSimulatedArtifacts(findingsArtA);
+        push({ title: 'Handoff Failure on Topic B', message: 'API connection timed out. Retrying with exponential backoff...', variant: 'info' });
+        await delay(2000);
+        
+        // 3. B succeeds on retry
+        simSteps = simSteps.map(s => s.nodeId === 'research_topic_b' ? { ...s, status: 'success', cost: 0.001, latency: 1200, tokens: 750, retries: 1 } : s);
+        setSimulatedSteps([...simSteps]);
+        activeStates['research_topic_b'] = 'success';
+        setNodeStates({ ...activeStates });
+        
+        const findingsArtB = [
+          ...findingsArtA,
+          {
+            id: 'art_b',
+            node_id: 'research_topic_b',
+            schema_ref: 'agents/research_agent/output_schema',
+            payload_json: {
+              findings: [
+                "Hydrogen vehicles store compressed hydrogen gas (700 bar) onboard.",
+                "Energy is generated via a chemical reaction in the fuel cell stack.",
+                "Challenges involve low refueling infrastructure density and hydrogen transport loss."
+              ]
+            }
           }
-        }
-      ];
-      setSimulatedArtifacts(findingsArtB);
-      push({ title: 'Topic B Success', message: 'Retry attempt succeeded.', variant: 'success' });
-      await sleep(1200);
-      
-      // 4. Run write draft
-      simSteps = simSteps.map(s => s.nodeId === 'write_draft' ? { ...s, status: 'running' } : s);
-      setSimulatedSteps([...simSteps]);
-      activeStates['write_draft'] = 'running';
-      setNodeStates({ ...activeStates });
-      await sleep(2200);
-      
-      simSteps = simSteps.map(s => s.nodeId === 'write_draft' ? { ...s, status: 'success', cost: 0.003, latency: 2500, tokens: 1950 } : s);
-      setSimulatedSteps([...simSteps]);
-      activeStates['write_draft'] = 'success';
-      setNodeStates({ ...activeStates });
-      
-      const draftArt = [
-        ...findingsArtB,
-        {
-          id: 'art_draft',
-          node_id: 'write_draft',
-          schema_ref: 'agents/writer_agent/output_schema',
-          payload_json: {
-            draft: "# Comparative Report: Lithium-Ion vs Hydrogen Fuel Cells\n\n## Core Findings\n- Lithium-ion batteries store energy chemically with high efficiency.\n- Hydrogen vehicles utilize onboard fuel-cell stacks to convert hydrogen to electricity.\n\n## Policy Recommendations\nInvest in battery charging corridors for urban passenger transport, while keeping hydrogen reserved for heavy transport and long-haul shipping."
+        ];
+        setSimulatedArtifacts(findingsArtB);
+        push({ title: 'Topic B Success', message: 'Retry attempt succeeded.', variant: 'success' });
+        await delay(1200);
+        
+        // 4. Run write draft
+        simSteps = simSteps.map(s => s.nodeId === 'write_draft' ? { ...s, status: 'running' } : s);
+        setSimulatedSteps([...simSteps]);
+        activeStates['write_draft'] = 'running';
+        setNodeStates({ ...activeStates });
+        await delay(2200);
+        
+        simSteps = simSteps.map(s => s.nodeId === 'write_draft' ? { ...s, status: 'success', cost: 0.003, latency: 2500, tokens: 1950 } : s);
+        setSimulatedSteps([...simSteps]);
+        activeStates['write_draft'] = 'success';
+        setNodeStates({ ...activeStates });
+        
+        const draftArt = [
+          ...findingsArtB,
+          {
+            id: 'art_draft',
+            node_id: 'write_draft',
+            schema_ref: 'agents/writer_agent/output_schema',
+            payload_json: {
+              draft: "# Comparative Report: Lithium-Ion vs Hydrogen Fuel Cells\n\n## Core Findings\n- Lithium-ion batteries store energy chemically with high efficiency.\n- Hydrogen vehicles utilize onboard fuel-cell stacks to convert hydrogen to electricity.\n\n## Policy Recommendations\nInvest in battery charging corridors for urban passenger transport, while keeping hydrogen reserved for heavy transport and long-haul shipping."
+            }
           }
-        }
-      ];
-      setSimulatedArtifacts(draftArt);
-      await sleep(1000);
-      
-      // 5. Run human review gate
-      simSteps = simSteps.map(s => s.nodeId === 'verify_and_approve' ? { ...s, status: 'running' } : s);
-      setSimulatedSteps([...simSteps]);
-      activeStates['verify_and_approve'] = 'running';
-      setNodeStates({ ...activeStates });
-      push({ title: 'Human Review Gate', message: 'Workflow paused at verify_and_approve. Please approve the draft.', variant: 'info' });
-      await sleep(3500);
-      
-      // 6. Auto-approve
-      simSteps = simSteps.map(s => s.nodeId === 'verify_and_approve' ? { ...s, status: 'success', cost: 0.001, latency: 450, tokens: 150 } : s);
-      setSimulatedSteps([...simSteps]);
-      activeStates['verify_and_approve'] = 'success';
-      setNodeStates({ ...activeStates });
-      
-      const finalArt = [
-        ...draftArt,
-        {
-          id: 'art_approval',
-          node_id: 'verify_and_approve',
-          schema_ref: 'manual_approval',
-          payload_json: { approved: true, feedback: "Automated verification checks passed successfully." }
-        }
-      ];
-      setSimulatedArtifacts(finalArt);
-      push({ title: 'Workflow Complete', message: 'Status: SUCCESS', variant: 'success' });
-      setExecCollapsed(false);
-      execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
+        ];
+        setSimulatedArtifacts(draftArt);
+        await delay(1000);
+        
+        // 5. Run human review gate
+        simSteps = simSteps.map(s => s.nodeId === 'verify_and_approve' ? { ...s, status: 'running' } : s);
+        setSimulatedSteps([...simSteps]);
+        activeStates['verify_and_approve'] = 'running';
+        setNodeStates({ ...activeStates });
+        push({ title: 'Human Review Gate', message: 'Workflow paused at verify_and_approve. Please approve the draft.', variant: 'info' });
+        await delay(3500);
+        
+        // 6. Auto-approve
+        simSteps = simSteps.map(s => s.nodeId === 'verify_and_approve' ? { ...s, status: 'success', cost: 0.001, latency: 450, tokens: 150 } : s);
+        setSimulatedSteps([...simSteps]);
+        activeStates['verify_and_approve'] = 'success';
+        setNodeStates({ ...activeStates });
+        
+        const finalArt = [
+          ...draftArt,
+          {
+            id: 'art_approval',
+            node_id: 'verify_and_approve',
+            schema_ref: 'manual_approval',
+            payload_json: { approved: true, feedback: "Automated verification checks passed successfully." }
+          }
+        ];
+        setSimulatedArtifacts(finalArt);
+        push({ title: 'Workflow Complete', message: 'Status: SUCCESS', variant: 'success' });
+        setExecCollapsed(false);
+        execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
+      }
+    } catch (err: any) {
+      if (err.message === 'cancelled') {
+        console.log('Local simulation execution cancelled');
+      } else {
+        throw err;
+      }
+    } finally {
+      setIsRunning(false);
     }
   };
 
   const handleRun = async (promptGoal?: string) => {
     const targetGoal = typeof promptGoal === 'string' && promptGoal.trim() ? promptGoal : 'Market Entry Brief';
+    cancelRef.current = false;
+    setIsRunning(true);
+    setCurrentPrompt(targetGoal);
     setIsSimulationMode(false);
     setSimulatedSteps(undefined);
     setSimulatedArtifacts(undefined);
@@ -273,9 +307,12 @@ function MaestroShell() {
     try {
       push({ title: 'Compiling Workflow', message: `Decomposing goal: "${targetGoal.slice(0, 35)}..."`, variant: 'info' });
       const graph = await api.compileGoal(targetGoal, 'mock', '');
+      if (cancelRef.current) return;
       await api.saveGraph(graph);
+      if (cancelRef.current) return;
       
       const { run_id } = await api.createRun(graph.id, 'mock', '');
+      if (cancelRef.current) return;
       setActiveRunId(run_id);
       
       setExecCollapsed(false);
@@ -286,13 +323,16 @@ function MaestroShell() {
       let maxSteps = 15;
       let stepsCount = 0;
       while (['pending', 'running', 'paused_review'].includes(status) && stepsCount < maxSteps) {
+        if (cancelRef.current) break;
         if (status === 'paused_review') {
           push({ title: 'Review Gate', message: 'Workflow is paused waiting for human approval.', variant: 'info' });
           // If it pauses, we trigger review approval on backend for automatic execution demonstration
           await new Promise(r => setTimeout(r, 3000));
+          if (cancelRef.current) break;
           await api.approveReview(run_id, 'verify_and_approve', { approved: true, feedback: 'Approved' });
         }
         const res = await api.runStep(run_id);
+        if (cancelRef.current) break;
         status = res.status;
         
         // Update nodeStates dynamically based on events!
@@ -309,15 +349,21 @@ function MaestroShell() {
         stepsCount++;
         await new Promise(r => setTimeout(r, 1500));
       }
-      if (['success', 'blocked', 'failed'].includes(status)) {
+      if (['success', 'blocked', 'failed'].includes(status) && !cancelRef.current) {
         push({ title: 'Run completed', message: `Status: ${status.toUpperCase()}`, variant: 'success' });
         setExecCollapsed(false);
         execHeight.setSize(Math.min(380, Math.floor(window.innerHeight * 0.45)));
       }
     } catch (err: any) {
-      console.warn('Backend connection error. Switching to Browser Simulation Fallback.', err);
-      push({ title: 'Connection Offline', message: 'Cannot reach backend server. Switched to offline simulation mode.', variant: 'warning' });
-      runLocalSimulation(targetGoal);
+      if (cancelRef.current) {
+        console.log('API run execution cancelled');
+      } else {
+        console.warn('Backend connection error. Switching to Browser Simulation Fallback.', err);
+        push({ title: 'Connection Offline', message: 'Cannot reach backend server. Switched to offline simulation mode.', variant: 'warning' });
+        runLocalSimulation(targetGoal);
+      }
+    } finally {
+      setIsRunning(false);
     }
   };
 
@@ -357,6 +403,8 @@ function MaestroShell() {
         onToggleWorkflow={() => { if (workflowOpen) closeWorkflow(); else openWorkflow(); }}
         workflowOpen={workflowOpen}
         onOpenMobileSidebar={showSidebarAsDrawer ? () => setSidebarDrawerOpen(true) : undefined}
+        isRunning={isRunning}
+        onStopOrchestration={handleStopOrchestration}
       />
       <div className="flex flex-1 min-h-0">
         {showSidebarAsDrawer ? (
@@ -404,7 +452,13 @@ function MaestroShell() {
             )}
           </div>
         ) : (
-          <HomePage onOpenWorkflow={openWorkflow} onSubmitPrompt={handleRun} />
+          <HomePage 
+            onOpenWorkflow={openWorkflow} 
+            onSubmitPrompt={handleRun} 
+            isRunning={isRunning}
+            currentPrompt={currentPrompt}
+            onStopOrchestration={handleStopOrchestration}
+          />
         )}
       </div>
 

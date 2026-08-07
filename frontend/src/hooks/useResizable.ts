@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export function useResizable(initial: number, min: number, max: number, axis: 'x' | 'y' = 'x') {
+export function useResizable(initial: number, min: number, max: number, axis: 'x' | 'y' = 'x', invert: boolean = false) {
   const [size, setSize] = useState(initial);
   const startRef = useRef<{ pos: number; size: number } | null>(null);
 
@@ -12,7 +12,7 @@ export function useResizable(initial: number, min: number, max: number, axis: 'x
         if (!startRef.current) return;
         const current = axis === 'x' ? ev.clientX : ev.clientY;
         const delta = current - startRef.current.pos;
-        const next = Math.max(min, Math.min(max, startRef.current.size + (axis === 'y' ? -delta : delta)));
+        const next = Math.max(min, Math.min(max, startRef.current.size + (invert ? -delta : delta)));
         setSize(next);
       };
       const up = () => {
@@ -27,7 +27,7 @@ export function useResizable(initial: number, min: number, max: number, axis: 'x
       document.body.style.userSelect = 'none';
       document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
     },
-    [size, min, max, axis],
+    [size, min, max, axis, invert],
   );
 
   return { size, setSize, onPointerDown };

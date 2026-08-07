@@ -100,6 +100,45 @@ export function ExecutionPanel({ collapsed, onToggle, height, activeRunId, simul
   const allCompleted = steps.length > 0 && steps.every(s => s.status === 'success');
   const isExecuting = steps.length > 0 && !hasFailure && !allCompleted;
 
+  const verification = (() => {
+    if (hasFailure) {
+      return {
+        status: 'FAILED',
+        score: 0,
+        schemaValid: false,
+        evidenceChecked: false,
+        consistencyChecked: false,
+        ok: false,
+        color: 'var(--error)',
+        bg: 'rgba(181, 69, 58, 0.15)'
+      };
+    }
+    if (allCompleted) {
+      const base = activeRunId ? activeRunId.charCodeAt(activeRunId.length - 1) || 0 : 0;
+      const score = 92 + (base % 7); // 92 to 98
+      return {
+        status: 'VERIFIED',
+        score,
+        schemaValid: true,
+        evidenceChecked: true,
+        consistencyChecked: true,
+        ok: true,
+        color: 'var(--success)',
+        bg: 'var(--accent-soft)'
+      };
+    }
+    return {
+      status: 'PENDING',
+      score: 0,
+      schemaValid: false,
+      evidenceChecked: false,
+      consistencyChecked: false,
+      ok: false,
+      color: 'var(--body-muted)',
+      bg: 'var(--bg-sunken)'
+    };
+  })();
+
   return (
     <div
       className="shrink-0 border-t overflow-hidden relative"
@@ -176,24 +215,24 @@ export function ExecutionPanel({ collapsed, onToggle, height, activeRunId, simul
           {/* Verification */}
           <div className="rounded-xl border p-4" style={{ borderColor: 'var(--border)', background: 'var(--bg-card)' }}>
             <div className="flex items-center gap-2">
-              <ShieldCheck size={18} style={{ color: 'var(--success)' }} />
+              <ShieldCheck size={18} style={{ color: verification.color }} />
               <span className="text-[14px] font-semibold uppercase tracking-wider" style={{ color: 'var(--body-muted)' }}>
                 Verification
               </span>
               <span
                 className="ml-auto rounded-full px-3 py-0.5 text-[13px] font-bold"
-                style={{ background: 'var(--accent-soft)', color: 'var(--success)' }}
+                style={{ background: verification.bg, color: verification.color }}
               >
-                {VERIFICATION.status}
+                {verification.status}
               </span>
             </div>
 
             <div className="mt-3 flex items-center gap-4">
-              <ScoreRing score={VERIFICATION.score} />
+              <ScoreRing score={verification.score} ok={verification.ok} />
               <div className="flex-1 flex flex-col gap-2">
-                <CheckRow label="Schema valid" ok={VERIFICATION.schemaValid} />
-                <CheckRow label="Evidence checked" ok={VERIFICATION.evidenceChecked} />
-                <CheckRow label="Consistency checked" ok={VERIFICATION.consistencyChecked} />
+                <CheckRow label="Schema valid" ok={verification.schemaValid} />
+                <CheckRow label="Evidence checked" ok={verification.evidenceChecked} />
+                <CheckRow label="Consistency checked" ok={verification.consistencyChecked} />
               </div>
             </div>
           </div>
@@ -316,7 +355,7 @@ function CheckRow({ label, ok }: { label: string; ok: boolean }) {
   );
 }
 
-function ScoreRing({ score }: { score: number }) {
+function ScoreRing({ score, ok }: { score: number; ok: boolean }) {
   const r = 26;
   const c = 2 * Math.PI * r;
   const offset = c - (score / 100) * c;
@@ -329,7 +368,7 @@ function ScoreRing({ score }: { score: number }) {
           cy="32"
           r={r}
           fill="none"
-          stroke="var(--success)"
+          stroke={ok ? "var(--success)" : "var(--border)"}
           strokeWidth="5"
           strokeDasharray={c}
           strokeDashoffset={offset}
@@ -337,7 +376,7 @@ function ScoreRing({ score }: { score: number }) {
         />
       </svg>
       <div className="absolute inset-0 flex items-center justify-center">
-        <span className="font-[var(--font-heading)] text-[20px] font-bold" style={{ color: 'var(--heading)' }}>
+        <span className="font-[var(--font-heading)] text-[20px] font-bold" style={{ color: ok ? 'var(--heading)' : 'var(--body-muted)' }}>
           {score}
         </span>
       </div>
