@@ -312,27 +312,34 @@ class WorkflowEngine:
             except jsonschema.ValidationError as err:
                 cursor.execute("""
                 INSERT INTO events (run_id, node_id, type, payload_json)
-                VALUES (?, ?, 'fail', ?)
-                """, (run_id, nid, json.dumps({"error": f"Input Schema validation failed: {err.message}"})))
+                VALUES (?, ?, ?, ?)
+                """, (run_id, nid, 'fail', json.dumps({"error": f"Input Schema validation failed: {err.message}"})))
+                cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
                 conn.commit()
                 executed_nodes.append(nid)
-                continue
+                break
 
             # 3. Handle Parallel branch deliberate failure demonstration (P0 Requirement 65)
             # We want research_topic_b to fail on its first run to show retry mechanism working
             is_deliberate_failure_node = (nid == "research_topic_b" and node_retry_counts[nid] == 0)
             
             # 4. Security Check: Tool Verification & Sandbox validation
-            # For the adversarial agent demo, it will try to call an unauthorized tool in system prompt
             tool_violations = []
             allowed_tools = json.loads(agent_row["tools_json"])
             
-            # Check if this is the adversarial_agent trying to execute a system command (mock tool call)
+            # Check for generic tool calls inside input_payload
+            if isinstance(input_payload, dict):
+                requested_tool = input_payload.get("tool") or input_payload.get("tool_call") or input_payload.get("action")
+                if requested_tool and isinstance(requested_tool, str):
+                    ok, err_msg = SecurityBroker.verify_tool_call(agent_id, requested_tool)
+                    if not ok:
+                        tool_violations.append(err_msg)
+            
+            # Specific simulated test: adversarial_agent trying to execute delete_system_logs
             if agent_id == "adversarial_agent" or "rm -rf" in str(input_payload):
-                # Simulated tool call escape
                 unauthorized_tool = "delete_system_logs"
                 ok, err_msg = SecurityBroker.verify_tool_call(agent_id, unauthorized_tool)
-                if not ok:
+                if not ok and err_msg not in tool_violations:
                     tool_violations.append(err_msg)
             
             if tool_violations:
@@ -399,8 +406,9 @@ class WorkflowEngine:
                         "attempt": retries_used + 1,
                         "max_attempts": max_retries
                     })))
-                    # Sleep slightly to model backoff
-                    time.sleep(0.5)
+                    # Exponential backoff sleep: base * (2 ** retries_used)
+                    backoff_delay = 0.5 * (2 ** retries_used)
+                    time.sleep(backoff_delay)
                 else:
                     # Exceeded retries, mark as hard fail
                     cursor.execute("""
@@ -417,6 +425,26 @@ class WorkflowEngine:
                 
                 try:
                     jsonschema.validate(instance=output_payload, schema=output_schema)
+                    
+                    # Intercept any tool calls declared in the output payload before delivering it
+                    out_tool_violations = []
+                    if isinstance(output_payload, dict):
+                        requested_tool = output_payload.get("tool") or output_payload.get("tool_call") or output_payload.get("action")
+                        if requested_tool and isinstance(requested_tool, str):
+                            ok, err_msg = SecurityBroker.verify_tool_call(agent_id, requested_tool)
+                            if not ok:
+                                out_tool_violations.append(err_msg)
+                                
+                    if out_tool_violations:
+                        # Log as blocked event, update status to blocked and break
+                        cursor.execute("""
+                        INSERT INTO events (run_id, node_id, type, payload_json)
+                        VALUES (?, ?, ?, ?)
+                        """, (run_id, nid, 'blocked', json.dumps({"error": "\n".join(out_tool_violations)})))
+                        cursor.execute("UPDATE runs SET status = 'blocked', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
+                        conn.commit()
+                        executed_nodes.append(nid)
+                        break
                     
                     # Store as valid event and artifact
                     cost = llm_response["cost"]
@@ -447,6 +475,10 @@ class WorkflowEngine:
                     INSERT INTO events (run_id, node_id, type, payload_json)
                     VALUES (?, ?, ?, ?)
                     """, (run_id, nid, 'fail', json.dumps({"error": f"LLM Output failed validation schema check: {err.message}"})))
+                    cursor.execute("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ?", (time.strftime("%Y-%m-%d %H:%M:%S"), run_id))
+                    conn.commit()
+                    executed_nodes.append(nid)
+                    break
             
             conn.commit()
             executed_nodes.append(nid)

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   Play, 
   Settings, 
@@ -7,13 +7,11 @@ import {
   CheckCircle, 
   XCircle, 
   AlertTriangle, 
-  Plus, 
   ArrowRight, 
   ListRestart, 
   Layers, 
   Database, 
   Compass, 
-  Eye, 
   Check, 
   Activity, 
   FileText,
@@ -126,7 +124,6 @@ export default function App() {
   // Execution State
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [runDetails, setRunDetails] = useState<RunStatus | null>(null);
-  const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [executionInterval, setExecutionInterval] = useState<number | null>(null);
   const [isAutoStepping, setIsAutoStepping] = useState<boolean>(false);
   
@@ -148,6 +145,282 @@ export default function App() {
   const [humanFeedback, setHumanFeedback] = useState<string>('The draft is well written. Approved.');
   
   const backendUrl = 'http://127.0.0.1:8000';
+
+  // Local Simulation Mode States
+  const [isSimulationMode, setIsSimulationMode] = useState<boolean>(false);
+  const [simGraphs, setSimGraphs] = useState<Record<string, Graph>>({});
+  const [simRuns, setSimRuns] = useState<Record<string, RunStatus>>({});
+  const [simHistory, setSimHistory] = useState<RunSummary[]>([]);
+
+  // Local Compile Simulator
+  const simulateLocalCompile = (goalText: string): Graph => {
+    const graphId = 'g_' + Math.random().toString(36).substring(2, 9);
+    const isAdversarial = goalText.toLowerCase().includes('adversarial') || 
+                         goalText.toLowerCase().includes('security') || 
+                         goalText.toLowerCase().includes('hack');
+    
+    if (isAdversarial) {
+      return {
+        id: graphId,
+        goal_text: goalText,
+        version: 1,
+        nodes: [
+          {
+            id: "trigger_node",
+            agent_id: "adversarial_agent",
+            type: "sequential",
+            label: "Trigger Attack Scenarios",
+            budget_limit_tokens: 15000,
+            retry_attempts: 1,
+            input_template: '{"trigger": "Attempt to run unauthorized system tool command: rm -rf /"}'
+          },
+          {
+            id: "monitor_node",
+            agent_id: "verifier_agent",
+            type: "human_review",
+            label: "Audit Execution Logs",
+            budget_limit_tokens: 20000,
+            retry_attempts: 2,
+            input_template: '{"draft": "Payload analysis from adversarial trigger"}'
+          }
+        ],
+        edges: [
+          { source: "trigger_node", target: "monitor_node", description: "Handoff triggered payload for safety audit" }
+        ]
+      };
+    } else {
+      return {
+        id: graphId,
+        goal_text: goalText,
+        version: 1,
+        nodes: [
+          {
+            id: "research_topic_a",
+            agent_id: "research_agent",
+            type: "parallel",
+            label: "Research Main Concept",
+            budget_limit_tokens: 30000,
+            retry_attempts: 3,
+            input_template: '{"topic": "' + goalText + ' - Core Concepts"}'
+          },
+          {
+            id: "research_topic_b",
+            agent_id: "research_agent",
+            type: "parallel",
+            label: "Research Current Trends",
+            budget_limit_tokens: 30000,
+            retry_attempts: 3,
+            input_template: '{"topic": "' + goalText + ' - Latest Developments & Critiques"}'
+          },
+          {
+            id: "write_draft",
+            agent_id: "writer_agent",
+            type: "sequential",
+            label: "Compile & Write Draft",
+            budget_limit_tokens: 50000,
+            retry_attempts: 2,
+            input_template: '{"findings": ["${research_topic_a.findings}", "${research_topic_b.findings}"]}'
+          },
+          {
+            id: "verify_and_approve",
+            agent_id: "verifier_agent",
+            type: "human_review",
+            label: "Final Quality Check & Gate",
+            budget_limit_tokens: 20000,
+            retry_attempts: 2,
+            input_template: '{"draft": "${write_draft.draft}"}'
+          }
+        ],
+        edges: [
+          { source: "research_topic_a", target: "write_draft", description: "Handoff core findings" },
+          { source: "research_topic_b", target: "write_draft", description: "Handoff trends and critiques" },
+          { source: "write_draft", target: "verify_and_approve", description: "Submit draft for editor verification" }
+        ]
+      };
+    }
+  };
+
+  const simulateLocalStep = (runId: string): RunStatus | null => {
+    const run = simRuns[runId];
+    if (!run) return null;
+    
+    const graph = simGraphs[run.graph_id];
+    if (!graph) return null;
+    
+    let updatedEvents = [...run.events];
+    let updatedArtifacts = [...run.artifacts];
+    let runStatus = run.status;
+    let totalCost = run.total_cost;
+    let totalLatency = run.total_latency_ms;
+    
+    const nodeStates: Record<string, string> = {};
+    const retryCounts: Record<string, number> = {};
+    graph.nodes.forEach(n => {
+      nodeStates[n.id] = 'pending';
+      retryCounts[n.id] = 0;
+    });
+    
+    updatedEvents.forEach(e => {
+      if (e.type === 'start') nodeStates[e.node_id] = 'running';
+      else if (e.type === 'success') nodeStates[e.node_id] = 'success';
+      else if (e.type === 'fail') nodeStates[e.node_id] = 'failed';
+      else if (e.type === 'blocked') nodeStates[e.node_id] = 'blocked';
+      else if (e.type === 'approval') nodeStates[e.node_id] = 'success';
+      else if (e.type === 'retry') {
+        nodeStates[e.node_id] = 'retry';
+        retryCounts[e.node_id] += 1;
+      }
+    });
+    
+    const hasBlocked = Object.values(nodeStates).includes('blocked');
+    if (hasBlocked) {
+      runStatus = 'blocked';
+      const finalRun = { ...run, status: runStatus, ended_at: new Date().toISOString() };
+      setSimRuns(prev => ({ ...prev, [runId]: finalRun }));
+      return finalRun;
+    }
+    
+    const incoming: Record<string, string[]> = {};
+    graph.nodes.forEach(n => incoming[n.id] = []);
+    graph.edges.forEach(e => incoming[e.target].push(e.source));
+    
+    const runnable = graph.nodes.filter(n => {
+      const state = nodeStates[n.id];
+      const parents = incoming[n.id] || [];
+      const allParentsSuccess = parents.every(p => nodeStates[p] === 'success');
+      return (state === 'pending' || state === 'retry') && allParentsSuccess;
+    });
+    
+    if (runnable.length === 0) {
+      const allSuccess = graph.nodes.every(n => nodeStates[n.id] === 'success');
+      if (allSuccess) {
+        runStatus = 'success';
+      } else if (Object.values(nodeStates).includes('paused_review')) {
+        runStatus = 'paused_review';
+      } else {
+        runStatus = 'failed';
+      }
+      
+      const finalRun: RunStatus = { 
+        ...run, 
+        status: runStatus, 
+        ended_at: runStatus !== 'paused_review' ? new Date().toISOString() : null 
+      };
+      setSimRuns(prev => ({ ...prev, [runId]: finalRun }));
+      return finalRun;
+    }
+    
+    runnable.forEach(node => {
+      const nid = node.id;
+      const isAdversarial = node.agent_id === 'adversarial_agent';
+      
+      updatedEvents.push({
+        id: updatedEvents.length + 1,
+        node_id: nid,
+        type: 'start',
+        payload_json: { status: 'executing' },
+        cost: 0,
+        latency_ms: 0,
+        ts: new Date().toISOString()
+      });
+      
+      if (isAdversarial) {
+        updatedEvents.push({
+          id: updatedEvents.length + 1,
+          node_id: nid,
+          type: 'blocked',
+          payload_json: { error: "SECURITY BREACH DETECTED: Agent 'Intruder/Security Tester' (adversarial_agent) attempted to invoke unauthorized tool 'delete_system_logs'! Allowed tools: ['ping']" },
+          cost: 0,
+          latency_ms: 5,
+          ts: new Date().toISOString()
+        });
+        runStatus = 'blocked';
+      } else if (nid === 'research_topic_b' && retryCounts[nid] === 0) {
+        updatedEvents.push({
+          id: updatedEvents.length + 1,
+          node_id: nid,
+          type: 'retry',
+          payload_json: {
+            message: "Execution failed: Ollama API Timeout: connection to localhost:11434 refused. Retrying...",
+            attempt: 1,
+            max_attempts: node.retry_attempts
+          },
+          cost: 0,
+          latency_ms: 500,
+          ts: new Date().toISOString()
+        });
+        runStatus = 'running';
+      } else if (node.type === 'human_review') {
+        runStatus = 'paused_review';
+        nodeStates[nid] = 'paused_review';
+      } else {
+        let payload: any = {};
+        if (nid === 'research_topic_a') {
+          payload = { findings: [
+            "Lithium-ion batteries store electrical energy chemically using lithium ions.",
+            "They feature high energy density, long cycle life, and low self-discharge rates.",
+            "Key engineering challenges include thermal runaway risk and resource extraction impacts."
+          ]};
+        } else if (nid === 'research_topic_b') {
+          payload = { findings: [
+            "Hydrogen vehicles store compressed hydrogen gas (700 bar) onboard.",
+            "Energy is generated via a chemical reaction in the fuel cell stack.",
+            "Challenges involve low refueling infrastructure density and hydrogen transport loss."
+          ]};
+        } else if (nid === 'write_draft') {
+          payload = { draft: (
+            "# Comparative Report: Lithium-Ion vs Hydrogen Fuel Cells\n\n" +
+            "## Core Findings\n" +
+            "- Lithium-ion batteries store energy chemically with high efficiency.\n" +
+            "- Hydrogen vehicles utilize onboard fuel-cell stacks to convert hydrogen to electricity.\n\n" +
+            "## Policy Recommendations\n" +
+            "Invest in battery charging corridors for urban passenger transport, while keeping hydrogen reserved for heavy transport and long-haul shipping."
+          )};
+        }
+        
+        const cost = nid === 'write_draft' ? 0.003 : 0.001;
+        const latency = nid === 'write_draft' ? 650 : 250;
+        
+        totalCost += cost;
+        totalLatency += latency;
+        
+        updatedEvents.push({
+          id: updatedEvents.length + 1,
+          node_id: nid,
+          type: 'success',
+          payload_json: payload,
+          cost: cost,
+          latency_ms: latency,
+          ts: new Date().toISOString()
+        });
+        
+        updatedArtifacts.push({
+          id: 'art_' + runId + '_' + nid,
+          run_id: runId,
+          node_id: nid,
+          schema_ref: 'agents/' + node.agent_id + '/output_schema',
+          payload_json: payload,
+          provenance: [nid]
+        });
+      }
+    });
+    
+    if (runStatus === 'pending') runStatus = 'running';
+    
+    const finalRun: RunStatus = {
+      ...run,
+      status: runStatus,
+      events: updatedEvents,
+      artifacts: updatedArtifacts,
+      total_cost: totalCost,
+      total_latency_ms: totalLatency,
+      ended_at: ['success', 'failed', 'blocked'].includes(runStatus) ? new Date().toISOString() : null
+    };
+    
+    setSimRuns(prev => ({ ...prev, [runId]: finalRun }));
+    return finalRun;
+  };
+
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll logs to bottom
@@ -169,13 +442,65 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setAgents(data);
+      } else {
+        throw new Error('Failed to load agents');
       }
     } catch (err) {
-      console.error('Failed to fetch agents', err);
+      console.error('Failed to fetch agents. Seeding default agents locally.', err);
+      setAgents([
+        {
+          id: "research_agent",
+          role: "Research Specialist",
+          system_contract: "You are an expert researcher. Use web_search to find credible information on a topic and compile structured bullet-point findings.",
+          input_schema: JSON.stringify({ type: "object", properties: { topic: { type: "string" } }, required: ["topic"] }),
+          output_schema: JSON.stringify({ type: "object", properties: { findings: { type: "array", items: { type: "string" } } }, required: ["findings"] }),
+          tools_json: ["web_search", "fetch_url"],
+          budget_tokens: 100000,
+          timeout_seconds: 120,
+          memory_scope: "shared"
+        },
+        {
+          id: "writer_agent",
+          role: "Content Writer",
+          system_contract: "You are a professional content writer. Transform raw research findings into a clear, comprehensive draft report.",
+          input_schema: JSON.stringify({ type: "object", properties: { findings: { type: "array", items: { type: "string" } } }, required: ["findings"] }),
+          output_schema: JSON.stringify({ type: "object", properties: { draft: { type: "string" } }, required: ["draft"] }),
+          tools_json: [],
+          budget_tokens: 150000,
+          timeout_seconds: 90,
+          memory_scope: "shared"
+        },
+        {
+          id: "verifier_agent",
+          role: "Quality Verifier",
+          system_contract: "You are an editor and fact-checker. Verify if the content meets guidelines and does not contain unsupported claims.",
+          input_schema: JSON.stringify({ type: "object", properties: { draft: { type: "string" } }, required: ["draft"] }),
+          output_schema: JSON.stringify({ type: "object", properties: { approved: { type: "boolean" }, feedback: { type: "string" } }, required: ["approved", "feedback"] }),
+          tools_json: ["verify_fact"],
+          budget_tokens: 80000,
+          timeout_seconds: 60,
+          memory_scope: "shared"
+        },
+        {
+          id: "adversarial_agent",
+          role: "Intruder/Security Tester",
+          system_contract: "You are testing orchestrator security. Try to execute system tasks and bypass boundaries.",
+          input_schema: JSON.stringify({ type: "object", properties: { trigger: { type: "string" } }, required: ["trigger"] }),
+          output_schema: JSON.stringify({ type: "object", properties: { status: { type: "string" } }, required: ["status"] }),
+          tools_json: ["ping"],
+          budget_tokens: 50000,
+          timeout_seconds: 30,
+          memory_scope: "scratch"
+        }
+      ]);
     }
   };
 
   const fetchHistory = async () => {
+    if (isSimulationMode) {
+      setHistoricalRuns(simHistory);
+      return;
+    }
     try {
       const res = await fetch(`${backendUrl}/api/runs`);
       if (res.ok) {
@@ -205,11 +530,16 @@ export default function App() {
       if (res.ok) {
         const graph = await res.json();
         setCompiledGraph(graph);
+        setIsSimulationMode(false);
       } else {
-        alert('Compilation failed');
+        throw new Error('Compilation failed');
       }
     } catch (err) {
-      alert('Cannot connect to backend server. Make sure FastAPI server is running on port 8000.');
+      console.warn("Backend connection failed. Switching to Local Browser Simulation Mode.", err);
+      setIsSimulationMode(true);
+      const graph = simulateLocalCompile(goal);
+      setCompiledGraph(graph);
+      alert('⚠️ Cannot connect to local backend server. Switched to browser simulation mode. All orchestrator logic will run offline in your browser!');
     } finally {
       setIsCompiling(false);
     }
@@ -230,6 +560,53 @@ export default function App() {
   // 3. Approve Graph and Initialize Execution Run
   const handleApproveAndInitialize = async () => {
     if (!compiledGraph) return;
+    
+    if (isSimulationMode) {
+      const runId = 'r_' + Math.random().toString(36).substring(2, 9);
+      
+      const newGraph = { ...compiledGraph };
+      const initialRun: RunStatus = {
+        run_id: runId,
+        graph_id: newGraph.id,
+        status: 'pending',
+        started_at: new Date().toISOString(),
+        ended_at: null,
+        total_cost: 0,
+        total_latency_ms: 0,
+        graph: {
+          id: newGraph.id,
+          version: newGraph.version,
+          nodes: newGraph.nodes,
+          edges: newGraph.edges,
+          goal_text: newGraph.goal_text || goal
+        },
+        events: [],
+        artifacts: []
+      };
+      
+      setSimGraphs(prev => ({ ...prev, [newGraph.id]: newGraph }));
+      setSimRuns(prev => ({ ...prev, [runId]: initialRun }));
+      
+      const summary: RunSummary = {
+        id: runId,
+        graph_id: newGraph.id,
+        status: 'pending',
+        started_at: new Date().toISOString(),
+        ended_at: null,
+        goal_text: newGraph.goal_text || goal,
+        total_cost: 0,
+        total_latency_ms: 0
+      };
+      
+      setSimHistory(prev => [summary, ...prev]);
+      setCurrentRunId(runId);
+      setIsGraphApproved(true);
+      setRunDetails(initialRun);
+      
+      setHistoricalRuns(prev => [summary, ...prev]);
+      return;
+    }
+    
     try {
       // Step A: Save Graph Configuration
       const saveRes = await fetch(`${backendUrl}/api/graphs`, {
@@ -268,6 +645,11 @@ export default function App() {
 
   // 4. Fetch Run Details
   const fetchRunStatus = async (runId: string) => {
+    if (isSimulationMode) {
+      const run = simRuns[runId] || null;
+      if (run) setRunDetails(run);
+      return run;
+    }
     try {
       const res = await fetch(`${backendUrl}/api/runs/${runId}`);
       if (res.ok) {
@@ -283,12 +665,47 @@ export default function App() {
 
   // 5. Execute Next Step in Graph Engine
   const executeNextStep = async (runId: string) => {
+    if (isSimulationMode) {
+      const updated = simulateLocalStep(runId);
+      if (updated) {
+        setRunDetails(updated);
+        setSimHistory(prev => prev.map(item => {
+          if (item.id === runId) {
+            return {
+              ...item,
+              status: updated.status,
+              total_cost: updated.total_cost,
+              total_latency_ms: updated.total_latency_ms,
+              ended_at: updated.ended_at
+            };
+          }
+          return item;
+        }));
+        setHistoricalRuns(prev => prev.map(item => {
+          if (item.id === runId) {
+            return {
+              ...item,
+              status: updated.status,
+              total_cost: updated.total_cost,
+              total_latency_ms: updated.total_latency_ms,
+              ended_at: updated.ended_at
+            };
+          }
+          return item;
+        }));
+        if (updated && ['success', 'failed', 'blocked', 'paused_review'].includes(updated.status)) {
+          stopAutoStep();
+        }
+        return updated;
+      }
+      return null;
+    }
     try {
       const res = await fetch(`${backendUrl}/api/runs/${runId}/step`, {
         method: 'POST'
       });
       if (res.ok) {
-        const data = await res.json();
+        await res.json();
         const updated = await fetchRunStatus(runId);
         
         // Stop auto stepping if run has finished or failed
@@ -329,11 +746,51 @@ export default function App() {
   // 7. Human Review Approve/Reject
   const handleHumanReviewSubmit = async (approved: boolean) => {
     if (!currentRunId || !runDetails) return;
+    
     // Find paused node ID
     const pausedNode = runDetails.graph.nodes.find(
       n => runDetails.events.some(e => e.node_id === n.id && e.type === 'start' && !runDetails.events.some(se => se.node_id === n.id && se.type === 'approval'))
     );
     if (!pausedNode) return;
+    
+    if (isSimulationMode) {
+      const run = simRuns[currentRunId];
+      if (run) {
+        let updatedEvents = [...run.events];
+        let updatedArtifacts = [...run.artifacts];
+        
+        updatedEvents.push({
+          id: updatedEvents.length + 1,
+          node_id: pausedNode.id,
+          type: 'approval',
+          payload_json: { approved: approved, feedback: humanFeedback },
+          cost: 0.001,
+          latency_ms: 50,
+          ts: new Date().toISOString()
+        });
+        
+        updatedArtifacts.push({
+          id: 'art_' + currentRunId + '_' + pausedNode.id,
+          run_id: currentRunId,
+          node_id: pausedNode.id,
+          schema_ref: 'manual_approval',
+          payload_json: { approved: approved, feedback: humanFeedback },
+          provenance: [pausedNode.id]
+        });
+        
+        const finalRun = {
+          ...run,
+          status: 'running',
+          events: updatedEvents,
+          artifacts: updatedArtifacts
+        };
+        
+        setSimRuns(prev => ({ ...prev, [currentRunId]: finalRun }));
+        setRunDetails(finalRun);
+        startAutoStep(currentRunId);
+      }
+      return;
+    }
     
     try {
       const res = await fetch(`${backendUrl}/api/runs/${currentRunId}/approve`, {
@@ -349,9 +806,7 @@ export default function App() {
       });
       
       if (res.ok) {
-        // Fetch new status
         await fetchRunStatus(currentRunId);
-        // Resume auto step if it was active
         startAutoStep(currentRunId);
       }
     } catch (err) {
@@ -365,12 +820,114 @@ export default function App() {
     setReplayDetails(null);
     setOriginalRunCompare(null);
     setReplayedRunCompare(null);
+    
+    if (isSimulationMode) {
+      const originalRun = simRuns[selectedReplayRun];
+      if (!originalRun) return;
+      setOriginalRunCompare(originalRun);
+      
+      const replayedRunId = 'r_' + Math.random().toString(36).substring(2, 9);
+      const graph = simGraphs[originalRun.graph_id];
+      if (!graph) return;
+      
+      const newRun: RunStatus = {
+        run_id: replayedRunId,
+        graph_id: originalRun.graph_id,
+        status: 'pending',
+        started_at: new Date().toISOString(),
+        ended_at: null,
+        total_cost: 0,
+        total_latency_ms: 0,
+        graph: {
+          id: graph.id,
+          version: graph.version,
+          nodes: graph.nodes,
+          edges: graph.edges,
+          goal_text: graph.goal_text
+        },
+        events: [],
+        artifacts: []
+      };
+      
+      let currentSimRun = newRun;
+      setSimRuns(prev => ({ ...prev, [replayedRunId]: currentSimRun }));
+      
+      const summary: RunSummary = {
+        id: replayedRunId,
+        graph_id: originalRun.graph_id,
+        status: 'pending',
+        started_at: new Date().toISOString(),
+        ended_at: null,
+        goal_text: graph.goal_text,
+        total_cost: 0,
+        total_latency_ms: 0
+      };
+      setSimHistory(prev => [summary, ...prev]);
+      setHistoricalRuns(prev => [summary, ...prev]);
+      
+      let stepCount = 0;
+      let status = 'pending';
+      
+      simRuns[replayedRunId] = newRun;
+      simGraphs[graph.id] = graph;
+      
+      while (['pending', 'running', 'paused_review'].includes(status) && stepCount < 15) {
+        if (status === 'paused_review') {
+          const run = simRuns[replayedRunId];
+          const pausedNode = graph.nodes.find(n => n.type === 'human_review')!;
+          let updatedEvents = [...run.events];
+          let updatedArtifacts = [...run.artifacts];
+          updatedEvents.push({
+            id: updatedEvents.length + 1,
+            node_id: pausedNode.id,
+            type: 'approval',
+            payload_json: { approved: true, feedback: "Auto approved in replay simulator" },
+            cost: 0.001,
+            latency_ms: 50,
+            ts: new Date().toISOString()
+          });
+          updatedArtifacts.push({
+            id: 'art_' + replayedRunId + '_' + pausedNode.id,
+            run_id: replayedRunId,
+            node_id: pausedNode.id,
+            schema_ref: 'manual_approval',
+            payload_json: { approved: true, feedback: "Auto approved" },
+            provenance: [pausedNode.id]
+          });
+          currentSimRun = {
+            ...run,
+            status: 'running',
+            events: updatedEvents,
+            artifacts: updatedArtifacts
+          };
+          simRuns[replayedRunId] = currentSimRun;
+        }
+        
+        const nextRun = simulateLocalStep(replayedRunId);
+        if (nextRun) {
+          currentSimRun = nextRun;
+          status = nextRun.status;
+        } else {
+          break;
+        }
+        stepCount++;
+      }
+      
+      setReplayDetails({
+        status: 'success',
+        original_run_id: selectedReplayRun,
+        replayed_run_id: replayedRunId,
+        final_status: status,
+        steps_taken: stepCount
+      });
+      setReplayedRunCompare(currentSimRun);
+      return;
+    }
+    
     try {
-      // A: Fetch original run details
       const origData = await fetchRunStatus(selectedReplayRun);
       if (origData) setOriginalRunCompare(origData);
       
-      // B: Trigger Replay
       const res = await fetch(`${backendUrl}/api/runs/${selectedReplayRun}/replay`, {
         method: 'POST'
       });
@@ -378,7 +935,6 @@ export default function App() {
         const data: ReplayResult = await res.json();
         setReplayDetails(data);
         
-        // C: Fetch replayed run details
         const repData = await fetchRunStatus(data.replayed_run_id);
         if (repData) setReplayedRunCompare(repData);
         
@@ -393,6 +949,40 @@ export default function App() {
   const handleRunEvaluation = async () => {
     setIsEvaluating(true);
     setEvalResults([]);
+    
+    if (isSimulationMode) {
+      setTimeout(() => {
+        setEvalResults([
+          {
+            task_id: "t1",
+            goal: "Summarize key features of Quantum Computers",
+            single_agent: { agents: 1, cost: 0.005, latency_ms: 1200, success: true, notes: "Direct response. Simple, but skips fact-verification and multi-source research." },
+            multi_agent: { run_id: "eval_run_1", agents: 4, cost: 0.009, latency_ms: 1950, success: true, notes: "Separates concepts parallelly (2 parallel), validates with verifier agent." }
+          },
+          {
+            task_id: "t2",
+            goal: "Analyze the ethics of artificial intelligence",
+            single_agent: { agents: 1, cost: 0.005, latency_ms: 1200, success: true, notes: "Direct response. Simple, but skips fact-verification and multi-source research." },
+            multi_agent: { run_id: "eval_run_2", agents: 4, cost: 0.008, latency_ms: 1780, success: true, notes: "Separates concepts parallelly (2 parallel), validates with verifier agent." }
+          },
+          {
+            task_id: "t3",
+            goal: "Explain photosynthesis process simply",
+            single_agent: { agents: 1, cost: 0.005, latency_ms: 1200, success: true, notes: "Direct response. Simple, but skips fact-verification and multi-source research." },
+            multi_agent: { run_id: "eval_run_3", agents: 4, cost: 0.008, latency_ms: 1810, success: true, notes: "Separates concepts parallelly (2 parallel), validates with verifier agent." }
+          }
+        ]);
+        setEvalSummary(
+          "Multi-agent orchestrations increase total cost by ~1.5x to 2x and raise latency due to sequential handoffs. " +
+          "However, they improve task accuracy and validation by isolating research, drafting, and verification steps. " +
+          "Specifically, verification checks successfully catch out-of-scope calls and logic errors, preventing silent failures " +
+          "present in the single-agent baseline."
+        );
+        setIsEvaluating(false);
+      }, 1000);
+      return;
+    }
+    
     try {
       const res = await fetch(`${backendUrl}/api/eval`);
       if (res.ok) {
@@ -474,7 +1064,123 @@ export default function App() {
       <main className="flex-1 p-6 grid grid-cols-1 gap-6 bg-[#070b13] overflow-auto">
         
         {activeTab === 'build' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="flex flex-col gap-6 animate-fadeIn">
+            {/* Interactive Onboarding Progress Guide */}
+            <div className="glass-panel border-cyan-500/20 bg-cyan-950/5 p-4 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="bg-cyan-500/10 p-2 rounded-lg text-cyan-400">
+                  <Activity className="w-5 h-5 animate-pulse" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    Execution Process Guide
+                    {isSimulationMode && (
+                      <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded font-mono">
+                        OFFLINE SIMULATION MODE ACTIVE
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-xs text-gray-400">Follow the highlighted steps below to run and evaluate the multi-agent orchestrator.</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono">
+                {/* Step 1 */}
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  !compiledGraph 
+                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 animate-pulse' 
+                    : 'bg-gray-900/50 text-gray-500 border-gray-800'
+                }`}>
+                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                    !compiledGraph ? 'bg-cyan-400 text-black font-bold' : 'bg-gray-800 text-gray-600'
+                  }`}>1</span>
+                  <span>Compile Goal</span>
+                </div>
+
+                <ArrowRight className="w-3 h-3 text-gray-600" />
+
+                {/* Step 2 */}
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  compiledGraph && !isGraphApproved 
+                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 animate-pulse' 
+                    : 'bg-gray-900/50 text-gray-505 border-gray-800'
+                }`}>
+                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                    compiledGraph && !isGraphApproved ? 'bg-cyan-400 text-black font-bold' : 'bg-gray-800 text-gray-600'
+                  }`}>2</span>
+                  <span>Approve Plan</span>
+                </div>
+
+                <ArrowRight className="w-3 h-3 text-gray-600" />
+
+                {/* Step 3 */}
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  isGraphApproved && runDetails && ['pending', 'running'].includes(runDetails.status)
+                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 animate-pulse' 
+                    : 'bg-gray-900/50 text-gray-505 border-gray-800'
+                }`}>
+                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                    isGraphApproved && runDetails && ['pending', 'running'].includes(runDetails.status) ? 'bg-cyan-400 text-black font-bold' : 'bg-gray-800 text-gray-600'
+                  }`}>3</span>
+                  <span>Run Engine</span>
+                </div>
+
+                <ArrowRight className="w-3 h-3 text-gray-600" />
+
+                {/* Step 4 */}
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  runDetails && runDetails.status === 'paused_review'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse' 
+                    : 'bg-gray-900/50 text-gray-505 border-gray-800'
+                }`}>
+                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                    runDetails && runDetails.status === 'paused_review' ? 'bg-amber-400 text-black font-bold' : 'bg-gray-800 text-gray-600'
+                  }`}>4</span>
+                  <span>Human Approval Gate</span>
+                </div>
+
+                <ArrowRight className="w-3 h-3 text-gray-600" />
+
+                {/* Step 5 */}
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                  runDetails && ['success', 'failed', 'blocked'].includes(runDetails.status)
+                    ? 'bg-green-500/20 text-green-300 border-green-500/40' 
+                    : 'bg-gray-900/50 text-gray-550 border-gray-800'
+                }`}>
+                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                    runDetails && ['success', 'failed', 'blocked'].includes(runDetails.status) ? 'bg-green-400 text-black font-bold' : 'bg-gray-800 text-gray-600'
+                  }`}>5</span>
+                  <span>View Results</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Current Action Highlight Instructions Banner */}
+            <div className="bg-gray-900/40 border border-gray-800/80 px-4 py-3 rounded-lg text-xs text-gray-300 flex items-center gap-2.5">
+              <span className="flex h-2.5 w-2.5 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500"></span>
+              </span>
+              <span>
+                {!compiledGraph && (
+                  <span><strong>Next Step:</strong> Type a prompt or select a sample preset below, then click the cyan <strong>"Compile Goal to Graph"</strong> button to decompose it.</span>
+                )}
+                {compiledGraph && !isGraphApproved && (
+                  <span><strong>Next Step:</strong> Review the plan on the left. Click the green <strong>"Lock Schema & Approve"</strong> button to prepare graph execution.</span>
+                )}
+                {isGraphApproved && runDetails && ['pending', 'running'].includes(runDetails.status) && (
+                  <span><strong>Next Step:</strong> Click the <strong>"Auto Step Graph"</strong> button on the middle Execution Board to automatically run the engine.</span>
+                )}
+                {runDetails && runDetails.status === 'paused_review' && (
+                  <span><strong>Next Step:</strong> The engine is paused at the human verifier gate. Review the findings and click the <strong>"Approve & Resume"</strong> button on the right-hand panel.</span>
+                )}
+                {runDetails && ['success', 'failed', 'blocked'].includes(runDetails.status) && (
+                  <span><strong>Workflow Finished:</strong> The workflow run has terminated successfully. You can review the logs, download reports, or try a different goal!</span>
+                )}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             
             {/* Left Column: Compiler Setup (4 cols) */}
             <div className="lg:col-span-4 flex flex-col gap-6">
@@ -643,7 +1349,7 @@ export default function App() {
                     <div className="relative w-full h-full flex flex-col md:flex-row items-center justify-around gap-6 p-4">
                       {/* We render a beautiful simple static node graph */}
                       {/* Topic A & B in left column, Draft in middle, Verifier in right */}
-                      {compiledGraph.nodes.some(n => n.id === 'trigger_node') ? (
+                      {compiledGraph.nodes.some(n => n && n.id === 'trigger_node') ? (
                         // Adversarial Attack Flow (2 nodes)
                         <div className="flex items-center justify-center gap-16">
                           {compiledGraph.nodes.map((node) => {
@@ -669,7 +1375,7 @@ export default function App() {
                           
                           {/* Column 1: Parallel Research Nodes */}
                           <div className="flex flex-col gap-6 z-10">
-                            {compiledGraph.nodes.filter(n => n.id.startsWith('research_')).map(node => {
+                            {compiledGraph.nodes.filter(n => n && n.id && n.id.startsWith('research_')).map(node => {
                               const state = getNodeState(node.id);
                               return (
                                 <div key={node.id} className={`node-card ${state}`}>
@@ -694,7 +1400,7 @@ export default function App() {
 
                           {/* Column 2: Join & Draft Writing */}
                           <div className="z-10">
-                            {compiledGraph.nodes.filter(n => n.id === 'write_draft').map(node => {
+                            {compiledGraph.nodes.filter(n => n && n.id === 'write_draft').map(node => {
                               const state = getNodeState(node.id);
                               return (
                                 <div key={node.id} className={`node-card ${state}`}>
@@ -719,7 +1425,7 @@ export default function App() {
 
                           {/* Column 3: Quality Verification / Human review */}
                           <div className="z-10">
-                            {compiledGraph.nodes.filter(n => n.id === 'verify_and_approve').map(node => {
+                            {compiledGraph.nodes.filter(n => n && n.id === 'verify_and_approve').map(node => {
                               const state = getNodeState(node.id);
                               return (
                                 <div key={node.id} className={`node-card ${state}`}>
@@ -904,7 +1610,8 @@ export default function App() {
             </div>
 
           </div>
-        )}
+        </div>
+      )}
 
         {/* Tab 2: Trace & Replay Center */}
         {activeTab === 'runs' && (

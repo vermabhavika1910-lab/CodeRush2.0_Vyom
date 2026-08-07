@@ -3,6 +3,7 @@ import json
 import httpx
 import time
 from typing import Dict, Any, List
+from security import SecurityBroker
 
 # Load environment variables if .env exists
 from dotenv import load_dotenv
@@ -183,7 +184,7 @@ class LLMProviderAdapter:
 
     @staticmethod
     def _call_openai(model: str, messages: List[Dict[str, str]], schema: Dict[str, Any], start_time: float) -> Dict[str, Any]:
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = SecurityBroker.get_api_key("openai")
         if not api_key:
             return LLMProviderAdapter._mock_response(messages, schema, start_time)
             
@@ -237,7 +238,7 @@ class LLMProviderAdapter:
 
     @staticmethod
     def _call_anthropic(model: str, messages: List[Dict[str, str]], schema: Dict[str, Any], start_time: float) -> Dict[str, Any]:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = SecurityBroker.get_api_key("anthropic")
         if not api_key:
             return LLMProviderAdapter._mock_response(messages, schema, start_time)
             
