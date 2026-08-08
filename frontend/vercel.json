@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "http://your-backend-url.render.com/api/$1" },
+    { "source": "/api/(.*)", "destination": "https://coderush2-0-vyom.onrender.com/api/$1" },
     { "source": "/(.*)", "destination": "/$1" }
   ]
 }
